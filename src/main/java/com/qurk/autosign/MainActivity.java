@@ -9,6 +9,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -17,8 +18,6 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-
-import de.robv.android.xposed.XSharedPreferences;
 
 public class MainActivity extends Activity {
 
@@ -31,23 +30,16 @@ public class MainActivity extends Activity {
     private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
 
-    private XSharedPreferences quarkPrefs;
+    // 尝试通过反射使用 XSharedPreferences，避免直接引用导致崩溃
+    private Object quarkPrefs;
+    private boolean useXposedPrefs = false;
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         
-        // 初始化 XSharedPreferences 读取夸克APP的数据
-        quarkPrefs = new XSharedPreferences("com.quark.scanking", SP_NAME);
-        quarkPrefs.makeWorldReadable();
-        quarkPrefs.reload();
-        
-        // 同时支持旧包名
-        if (!quarkPrefs.getAll().containsKey(KEY_LAST_SIGN)) {
-            quarkPrefs = new XSharedPreferences("com.quark.scank", SP_NAME);
-            quarkPrefs.makeWorldReadable();
-            quarkPrefs.reload();
-        }
+        // 安全初始化跨进程读取
+        initXposedPrefs();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -62,10 +54,14 @@ public class MainActivity extends Activity {
 
         // Summary - 优先从夸克APP读取，如果没有则从模块读取
         android.content.SharedPreferences sp = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-        long quarkLastSign = quarkPrefs.getLong(KEY_LAST_SIGN, 0);
-        long quarkLastLottery = quarkPrefs.getLong(KEY_LAST_LOTTERY, 0);
-        long lastSign = sp.getLong(KEY_LAST_SIGN, 0);
-        long lastLottery = sp.getLong(KEY_LAST_LOTTERY, 0);
+        
+        // 从夸克APP读取数据（如果可用）
+        long quarkLastSign = getQuarkLong(KEY_LAST_SIGN, 0);
+        long quarkLastLottery = getQuarkLong(KEY_LAST_LOTTERY, 0);
+        
+        // 优先使用夸克的时间（更新的）
+        long lastSign = quarkLastSign > sp.getLong(KEY_LAST_SIGN, 0) ? quarkLastSign : sp.getLong(KEY_LAST_SIGN, 0);
+        long lastLottery = quarkLastLottery > sp.getLong(KEY_LAST_LOTTERY, 0) ? quarkLastLottery : sp.getLong(KEY_LAST_LOTTERY, 0);
 
         TextView summary = new TextView(this);
         if (lastSign == 0) {
@@ -162,8 +158,8 @@ public class MainActivity extends Activity {
         root.addView(logHeader);
 
         // 使用 XSharedPreferences 读取夸克APP的日志
-        quarkPrefs.reload();
-        String logRaw = quarkPrefs.getString(KEY_STATUS_LOG, "");
+        reloadQuarkPrefs();
+        String logRaw = getQuarkString(KEY_STATUS_LOG, "");
         if (logRaw.isEmpty()) {
             // 如果没有夸克日志，尝试读取模块自己的日志作为备选
             logRaw = sp.getString(KEY_STATUS_LOG, "");
@@ -187,5 +183,58 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         setContentView(scroll);
+    }
+    
+    // 安全初始化 XposedPreferences
+    private void initXposedPrefs() {
+        try {
+            Class<?> xspClass = Class.forName("de.robv.android.xposed.XSharedPreferences");
+            // 尝试 com.quark.scanking
+            quarkPrefs = xspClass.getConstructor(String.class, String.class)
+                .newInstance("com.quark.scanking", SP_NAME);
+            xspClass.getMethod("makeWorldReadable").invoke(quarkPrefs);
+            xspClass.getMethod("reload").invoke(quarkPrefs);
+            
+            // 检查是否有数据
+            Object keys = xspClass.getMethod("getAll").invoke(quarkPrefs);
+            if (keys instanceof java.util.Map && ((java.util.Map<?, ?>) keys).isEmpty()) {
+                // 尝试旧包名
+                quarkPrefs = xspClass.getConstructor(String.class, String.class)
+                    .newInstance("com.quark.scank", SP_NAME);
+                xspClass.getMethod("makeWorldReadable").invoke(quarkPrefs);
+            }
+            useXposedPrefs = true;
+        } catch (Throwable e) {
+            useXposedPrefs = false;
+            quarkPrefs = null;
+        }
+    }
+    
+    private void reloadQuarkPrefs() {
+        if (useXposedPrefs && quarkPrefs != null) {
+            try {
+                quarkPrefs.getClass().getMethod("reload").invoke(quarkPrefs);
+            } catch (Throwable ignored) {}
+        }
+    }
+    
+    private long getQuarkLong(String key, long def) {
+        if (!useXposedPrefs || quarkPrefs == null) return def;
+        try {
+            return (Long) quarkPrefs.getClass().getMethod("getLong", String.class, long.class)
+                .invoke(quarkPrefs, key, def);
+        } catch (Throwable e) {
+            return def;
+        }
+    }
+    
+    private String getQuarkString(String key, String def) {
+        if (!useXposedPrefs || quarkPrefs == null) return def;
+        try {
+            return (String) quarkPrefs.getClass().getMethod("getString", String.class, String.class)
+                .invoke(quarkPrefs, key, def);
+        } catch (Throwable e) {
+            return def;
+        }
     }
 }
