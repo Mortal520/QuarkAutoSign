@@ -33,7 +33,27 @@ jobs:
     - name: Download Xposed API
       run: |
         mkdir -p libs
-        wget -q -O libs/api-82.jar https://repo1.maven.org/maven2/de/robv/android/xposed/api/82/api-82.jar
+        URLS=(
+          "https://repo1.maven.org/maven2/de/robv/android/xposed/api/82/api-82.jar"
+          "https://repo.maven.apache.org/maven2/de/robv/android/xposed/api/82/api-82.jar"
+          "https://maven.aliyun.com/repository/public/de/robv/android/xposed/api/82/api-82.jar"
+        )
+
+        OK=0
+        for u in "${URLS[@]}"; do
+          echo "Trying: $u"
+          if curl -fL --retry 5 --retry-delay 2 --connect-timeout 20 "$u" -o libs/api-82.jar; then
+            OK=1
+            break
+          fi
+        done
+
+        if [ "$OK" -ne 1 ]; then
+          echo "Failed to download api-82.jar from all mirrors"
+          exit 1
+        fi
+
+        test -s libs/api-82.jar
         ls -lh libs/api-82.jar
 
     - name: Build APK
