@@ -34,12 +34,7 @@ jobs:
       run: |
         export GRADLE_HOME=$PWD/gradle-8.5
         export PATH=$GRADLE_HOME/bin:$PATH
-        # Create standard Android project structure if missing
-        mkdir -p app/src/main/java/com/qurk/autosign
-        mkdir -p app/src/main/assets
-        # Copy source files to app module
-        cp -r src/main/* app/src/main/ 2>/dev/null || true
-        # Run build
+        # Run build on root module
         gradle assembleDebug
 
     - name: Upload APK
@@ -47,7 +42,7 @@ jobs:
       if: always()
       with:
         name: QuarkAutoSign-Debug
-        path: app/build/outputs/apk/debug/*.apk
+        path: build/outputs/apk/debug/*.apk
         retention-days: 30
 
     - name: Release APK
@@ -56,7 +51,7 @@ jobs:
       with:
         tag_name: v1.0.${{ github.run_number }}
         name: QuarkAutoSign v1.0.${{ github.run_number }}
-        files: app/build/outputs/apk/debug/*.apk
+        files: build/outputs/apk/debug/*.apk
         body: |
           夸克扫描王自动签到 Xposed 模块
 
