@@ -31,7 +31,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public class QuarkAutoSign implements IXposedHookLoadPackage {
 
     private static final String TAG = "QuarkAutoSign";
-    private static final String TARGET_PKG = "com.quark.scank";
+    private static final String TARGET_PKG = "com.quark.scanking";
+    private static final String TARGET_PKG_LEGACY = "com.quark.scank";
     private static final String SP_NAME = "quark_autosign_prefs";
     private static final String KEY_LAST_SIGN = "last_sign_time";
     private static final String KEY_LAST_LOTTERY = "last_lottery_time";
@@ -46,7 +47,8 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!TARGET_PKG.equals(lpparam.packageName)) {
+        if (!TARGET_PKG.equals(lpparam.packageName)
+            && !TARGET_PKG_LEGACY.equals(lpparam.packageName)) {
             return;
         }
 

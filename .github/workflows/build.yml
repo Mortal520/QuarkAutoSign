@@ -59,19 +59,39 @@ jobs:
         test -s libs/api-82.jar
         ls -lh libs/api-82.jar
 
+    - name: Prepare release keystore (optional)
+      env:
+        KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      run: |
+        if [ -n "$KEYSTORE_BASE64" ]; then
+          echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+          cat > keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          ls -lh release.keystore keystore.properties
+        else
+          echo "No release keystore secrets found; build will use fallback signing."
+        fi
+
     - name: Build APK
       run: |
         export GRADLE_HOME=$PWD/gradle-8.5
         export PATH=$GRADLE_HOME/bin:$PATH
-        # Run build on root module
-        gradle assembleDebug
+        # Build release APK; if keystore.properties is missing, falls back to debug key
+        gradle assembleRelease
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: QuarkAutoSign-Debug
-        path: build/outputs/apk/debug/*.apk
+        name: QuarkAutoSign-Release
+        path: build/outputs/apk/release/*.apk
         retention-days: 30
 
     - name: Release APK
@@ -80,7 +100,7 @@ jobs:
       with:
         tag_name: v1.0.${{ github.run_number }}
         name: QuarkAutoSign v1.0.${{ github.run_number }}
-        files: build/outputs/apk/debug/*.apk
+        files: build/outputs/apk/release/*.apk
         body: |
           夸克扫描王自动签到 Xposed 模块
 

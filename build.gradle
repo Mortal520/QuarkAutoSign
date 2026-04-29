@@ -8,6 +8,22 @@ buildscript {
     }
 }
 
+import java.util.Properties
+
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file("keystore.properties")
+if (keystoreFile.exists()) {
+    keystoreFile.withInputStream { stream ->
+        keystoreProps.load(stream)
+    }
+}
+
+def hasReleaseSigning =
+    keystoreProps.getProperty("storeFile") &&
+    keystoreProps.getProperty("storePassword") &&
+    keystoreProps.getProperty("keyAlias") &&
+    keystoreProps.getProperty("keyPassword")
+
 allprojects {
     repositories {
         google()
@@ -28,10 +44,28 @@ android {
         versionName "1.0"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(keystoreProps.getProperty("storeFile"))
+                storePassword keystoreProps.getProperty("storePassword")
+                keyAlias keystoreProps.getProperty("keyAlias")
+                keyPassword keystoreProps.getProperty("keyPassword")
+                v1SigningEnabled true
+                v2SigningEnabled true
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
         }
     }
 }
