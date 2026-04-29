@@ -30,7 +30,7 @@ git add .
 git commit -m "Initial commit"
 
 # 添加远程仓库（替换 yourname 为你的GitHub用户名）
-git remote add origin https://github.com/yourname/QuarkAutoSign.git
+git remote add origin https://github.com/Mortal520/QuarkAutoSign.git
 
 # 推送
 git push -u origin main

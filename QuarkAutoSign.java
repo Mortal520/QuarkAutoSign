@@ -25,6 +25,7 @@ import java.util.Locale;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -76,65 +77,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             );
         } catch (Exception e) {
             Log.e(TAG, "Hook Application failed: " + e.getMessage());
-        }
-    }
-
-    private void doDailyLottery(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
-        log(lpparam, "开始每日自动抽奖，共" + DAILY_LOTTERY_TIMES + "次");
-        showToast(ctx, "开始自动抽奖");
-        for (int i = 1; i <= DAILY_LOTTERY_TIMES; i++) {
-            final int index = i;
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                boolean ok = triggerLotteryOnce(ctx, lpparam, index);
-                if (ok && index == DAILY_LOTTERY_TIMES) {
-                    ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                        .edit().putLong(KEY_LAST_LOTTERY, System.currentTimeMillis()).apply();
-                    showToast(ctx, "今日抽奖执行完成");
-                }
-            }, 4500L + (i - 1) * 1500L);
-        }
-    }
-
-    private boolean triggerLotteryOnce(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, int index) {
-        try {
-            Class<?> managerClass = XposedHelpers.findClass(
-                "com.ucpro.feature.study.userop.CameraCheckInManager",
-                ctx.getClassLoader()
-            );
-            Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", new Object[]{null});
-            if (manager == null) {
-                log(lpparam, "第" + index + "次抽奖失败：Manager为null");
-                return false;
-            }
-
-            String[] candidates = new String[]{
-                "lottery", "drawLottery", "requestLottery", "doLottery", "m63475p", "m63474o", "m63473n"
-            };
-            for (String method : candidates) {
-                try {
-                    XposedHelpers.callMethod(manager, method, "xposed_auto_lottery");
-                    recordSignTime(ctx, "lottery#" + index);
-                    log(lpparam, "第" + index + "次抽奖触发成功: " + method);
-                    showToast(ctx, "抽奖" + index + "成功");
-                    return true;
-                } catch (Throwable ignore) {
-                    try {
-                        XposedHelpers.callMethod(manager, method);
-                        recordSignTime(ctx, "lottery#" + index);
-                        log(lpparam, "第" + index + "次抽奖触发成功: " + method);
-                        showToast(ctx, "抽奖" + index + "成功");
-                        return true;
-                    } catch (Throwable ignored2) {
-                    }
-                }
-            }
-
-            log(lpparam, "第" + index + "次抽奖未找到可用方法");
-            showToast(ctx, "抽奖" + index + "未触发");
-            return false;
-        } catch (Throwable e) {
-            log(lpparam, "第" + index + "次抽奖异常: " + e.getMessage());
-            return false;
         }
     }
 
@@ -304,33 +246,74 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    private void performAutoTasks(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-            if (isEnabled(sp, KEY_ENABLE_SIGN, true)) {
-                if (!shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))) {
-                    log(lpparam, "今日已签到，跳过签到");
-                } else {
-                    log(lpparam, "今日未签到，3秒后执行签到");
-                    showToast(ctx, "准备自动签到...");
-                    new Handler(Looper.getMainLooper()).postDelayed(() -> doSignIn(ctx, lpparam), 3000);
-                }
-            } else {
-                log(lpparam, "自动签到开关关闭，跳过");
-            }
-
-            if (isEnabled(sp, KEY_ENABLE_LOTTERY, true)) {
-                if (!shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0))) {
-                    log(lpparam, "今日已抽奖，跳过抽奖");
-                } else {
-                    doDailyLottery(ctx, lpparam);
-                }
-            } else {
-                log(lpparam, "自动抽奖开关关闭，跳过");
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "performAutoTasks error: " + e.getMessage());
+    private volatile boolean tasksStarted = false;
+    private XSharedPreferences modulePrefs;
+    
+    private void initModulePrefs() {
+        if (modulePrefs == null) {
+            modulePrefs = new XSharedPreferences("com.qurk.autosign", SP_NAME);
+            modulePrefs.makeWorldReadable();
         }
+    }
+    
+    private boolean readSwitch(String key, boolean def) {
+        try {
+            initModulePrefs();
+            modulePrefs.reload();
+            return modulePrefs.getBoolean(key, def);
+        } catch (Exception e) {
+            Log.w(TAG, "readSwitch failed: " + e.getMessage());
+            return def;
+        }
+    }
+    
+    private void performAutoTasks(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        if (tasksStarted) {
+            log(lpparam, "任务已在执行中，跳过重复触发");
+            return;
+        }
+        tasksStarted = true;
+        
+        // 延迟10秒执行，确保APP完全初始化
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                boolean signEnabled = readSwitch(KEY_ENABLE_SIGN, true);
+                boolean lotteryEnabled = readSwitch(KEY_ENABLE_LOTTERY, true);
+                boolean toastEnabled = readSwitch(KEY_ENABLE_TOAST, true);
+                
+                log(lpparam, "开关状态: 签到=" + signEnabled + ", 抽奖=" + lotteryEnabled + ", Toast=" + toastEnabled);
+                
+                // 使用夸克APP的SharedPreferences读取状态
+                android.content.SharedPreferences quarkSp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+                
+                if (signEnabled) {
+                    long lastSign = quarkSp.getLong(KEY_LAST_SIGN, 0);
+                    if (shouldDoToday(lastSign)) {
+                        log(lpparam, "今日未签到，执行签到");
+                        doSignInSafe(ctx, lpparam);
+                    } else {
+                        log(lpparam, "今日已签到，跳过");
+                        if (toastEnabled) showToast(ctx, "今日已签到");
+                    }
+                } else {
+                    log(lpparam, "自动签到开关关闭，跳过");
+                }
+
+                if (lotteryEnabled) {
+                    long lastLottery = quarkSp.getLong(KEY_LAST_LOTTERY, 0);
+                    if (shouldDoToday(lastLottery)) {
+                        log(lpparam, "今日未抽奖，执行抽奖");
+                        doDailyLotterySafe(ctx, lpparam);
+                    } else {
+                        log(lpparam, "今日已抽奖，跳过");
+                    }
+                } else {
+                    log(lpparam, "自动抽奖开关关闭，跳过");
+                }
+            } catch (Throwable e) {
+                Log.e(TAG, "performAutoTasks error: " + e.getMessage());
+            }
+        }, 10000);
     }
 
     private boolean shouldDoToday(long ts) {
@@ -346,32 +329,105 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    private void doSignIn(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            log(lpparam, "正在获取 CameraCheckInManager...");
-            Class<?> managerClass = XposedHelpers.findClass(
-                "com.ucpro.feature.study.userop.CameraCheckInManager",
-                ctx.getClassLoader()
-            );
+    private void doSignInSafe(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(2000); // 再延迟2秒，确保网络模块初始化
+                log(lpparam, "[签到] 正在获取 CameraCheckInManager...");
+                
+                Class<?> managerClass = XposedHelpers.findClass(
+                    "com.ucpro.feature.study.userop.CameraCheckInManager",
+                    ctx.getClassLoader()
+                );
 
-            Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", new Object[]{null});
-            if (manager == null) {
-                log(lpparam, "CameraCheckInManager 为 null，签到失败");
-                showToast(ctx, "签到失败：Manager为null");
-                return;
+                Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
+                if (manager == null) {
+                    log(lpparam, "[签到] CameraCheckInManager 为 null");
+                    showToast(ctx, "签到失败：Manager为null");
+                    return;
+                }
+
+                log(lpparam, "[签到] 调用接口 m63476q...");
+                try {
+                    XposedHelpers.callMethod(manager, "m63476q", null, "xposed_auto_sign");
+                } catch (Throwable e1) {
+                    // 尝试无参调用
+                    try {
+                        XposedHelpers.callMethod(manager, "m63476q", new Object[]{null, "xposed_auto_sign"});
+                    } catch (Throwable e2) {
+                        log(lpparam, "[签到] 调用失败: " + e2.getMessage());
+                        showToast(ctx, "签到调用失败");
+                        return;
+                    }
+                }
+                
+                recordSignTime(ctx, "auto");
+                log(lpparam, "[签到] 触发成功 ✓");
+                showToast(ctx, "签到成功 ✓");
+            } catch (Throwable e) {
+                String msg = "[签到] 异常: " + e.getMessage();
+                Log.e(TAG, msg);
+                log(lpparam, msg);
+                showToast(ctx, "签到异常");
             }
-
-            log(lpparam, "调用签到接口 m63476q...");
-            XposedHelpers.callMethod(manager, "m63476q", null, "xposed_auto_sign");
-            recordSignTime(ctx, "auto");
-            log(lpparam, "签到触发成功 ✓");
-            showToast(ctx, "签到成功 ✓");
-        } catch (Exception e) {
-            String msg = "签到异常: " + e.getMessage();
-            Log.e(TAG, "doSignIn error: " + msg);
-            log(lpparam, msg);
-            showToast(ctx, "签到异常: " + e.getMessage());
-        }
+        }).start();
+    }
+    
+    private void doDailyLotterySafe(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        new Thread(() -> {
+            try {
+                Thread.sleep(3000); // 抽奖再延迟3秒
+                log(lpparam, "[抽奖] 开始每日抽奖，共" + DAILY_LOTTERY_TIMES + "次");
+                showToast(ctx, "开始自动抽奖");
+                
+                for (int i = 1; i <= DAILY_LOTTERY_TIMES; i++) {
+                    final int index = i;
+                    Thread.sleep(2000); // 每次抽奖间隔2秒
+                    
+                    try {
+                        Class<?> managerClass = XposedHelpers.findClass(
+                            "com.ucpro.feature.study.userop.CameraCheckInManager",
+                            ctx.getClassLoader()
+                        );
+                        Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
+                        if (manager == null) {
+                            log(lpparam, "[抽奖] 第" + index + "次失败：Manager为null");
+                            continue;
+                        }
+                        
+                        // 尝试调用抽奖方法
+                        boolean triggered = false;
+                        String[] candidates = new String[]{"m63475p", "m63474o", "m63473n", "lottery", "drawLottery"};
+                        for (String method : candidates) {
+                            try {
+                                XposedHelpers.callMethod(manager, method);
+                                triggered = true;
+                                break;
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        
+                        if (triggered) {
+                            recordSignTime(ctx, "lottery#" + index);
+                            log(lpparam, "[抽奖] 第" + index + "次成功");
+                            showToast(ctx, "抽奖" + index + "成功");
+                        } else {
+                            log(lpparam, "[抽奖] 第" + index + "次未找到方法");
+                        }
+                    } catch (Throwable e) {
+                        log(lpparam, "[抽奖] 第" + index + "次异常: " + e.getMessage());
+                    }
+                }
+                
+                // 记录抽奖完成时间
+                ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
+                    .edit().putLong(KEY_LAST_LOTTERY, System.currentTimeMillis()).apply();
+                showToast(ctx, "抽奖执行完成");
+                
+            } catch (Throwable e) {
+                log(lpparam, "[抽奖] 整体异常: " + e.getMessage());
+            }
+        }).start();
     }
 
     private void recordSignTime(Context ctx, String source) {
@@ -424,12 +480,12 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     }
 
     private void showToast(Context ctx, String msg) {
-        boolean enabled = true;
         try {
-            enabled = isEnabled(ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE), KEY_ENABLE_TOAST, true);
+            boolean enabled = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
+                .getBoolean(KEY_ENABLE_TOAST, true);
+            if (!enabled) return;
         } catch (Exception ignore) {
         }
-        if (!enabled) return;
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 Toast.makeText(ctx, "[夸克签到] " + msg, Toast.LENGTH_SHORT).show();
@@ -437,14 +493,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                 // ignore
             }
         });
-    }
-
-    private boolean isEnabled(android.content.SharedPreferences sp, String key, boolean def) {
-        if (!sp.contains(key)) {
-            sp.edit().putBoolean(key, def).apply();
-            return def;
-        }
-        return sp.getBoolean(key, def);
     }
 
 }
