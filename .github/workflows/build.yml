@@ -30,6 +30,12 @@ jobs:
         export PATH=$GRADLE_HOME/bin:$PATH
         gradle --version
 
+    - name: Download Xposed API
+      run: |
+        mkdir -p libs
+        wget -q -O libs/api-82.jar https://repo1.maven.org/maven2/de/robv/android/xposed/api/82/api-82.jar
+        ls -lh libs/api-82.jar
+
     - name: Build APK
       run: |
         export GRADLE_HOME=$PWD/gradle-8.5
