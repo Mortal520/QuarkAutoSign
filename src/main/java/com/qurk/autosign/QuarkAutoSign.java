@@ -8,7 +8,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
+import java.util.List;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -21,6 +24,8 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static final String TARGET_PKG = "com.quark.scank";
     private static final String SP_NAME = "quark_autosign_prefs";
     private static final String KEY_LAST_SIGN = "last_sign_time";
+    private static final String KEY_SIGN_HISTORY = "sign_history";
+    private static final int MAX_HISTORY = 30;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
@@ -108,22 +113,44 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
 
             Log.i(TAG, "Triggering sign-in...");
             XposedHelpers.callMethod(manager, "m63476q", null, "xposed_auto_sign");
-            recordSignTime(ctx);
+            recordSignTime(ctx, "auto");
             Log.i(TAG, "Sign-in triggered OK");
         } catch (Exception e) {
             Log.e(TAG, "doSignIn error: " + e.getMessage());
         }
     }
 
-    private void recordSignTime(Context ctx) {
+    private void recordSignTime(Context ctx, String source) {
         try {
-            ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putLong(KEY_LAST_SIGN, System.currentTimeMillis())
-                .apply();
+            long now = System.currentTimeMillis();
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+
+            // Update last sign time
+            sp.edit().putLong(KEY_LAST_SIGN, now).apply();
+
+            // Append to history: timestamp|source
+            String history = sp.getString(KEY_SIGN_HISTORY, "");
+            String entry = now + "|" + source;
+            List<String> list = new ArrayList<>();
+            if (!history.isEmpty()) {
+                list.addAll(Arrays.asList(history.split(",")));
+            }
+            list.add(entry);
+            // Keep only last MAX_HISTORY entries
+            while (list.size() > MAX_HISTORY) {
+                list.remove(0);
+            }
+            sp.edit().putString(KEY_SIGN_HISTORY, String.join(",", list)).apply();
+
+            Log.i(TAG, "Sign-in recorded: " + entry);
         } catch (Exception e) {
             Log.e(TAG, "recordSignTime error: " + e.getMessage());
         }
+    }
+
+    // Expose history key for MainActivity to read
+    public static String getSignHistoryKey() {
+        return KEY_SIGN_HISTORY;
     }
 
 }
