@@ -10,6 +10,16 @@
         android:label="夸克扫描王自动签到"
         android:icon="@android:drawable/ic_menu_today">
 
+        <activity
+            android:name=".MainActivity"
+            android:label="夸克自动签到"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
