@@ -206,9 +206,9 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             }
 
             TextView switches = new TextView(ctx);
-            switches.setText("\n功能开关：\n自动签到=" + isEnabled(sp, KEY_ENABLE_SIGN, true)
-                + "\n自动抽奖=" + isEnabled(sp, KEY_ENABLE_LOTTERY, true)
-                + "\nToast提示=" + isEnabled(sp, KEY_ENABLE_TOAST, true));
+            switches.setText("\n功能开关：\n自动签到=" + readSwitch(KEY_ENABLE_SIGN, true)
+                + "\n自动抽奖=" + readSwitch(KEY_ENABLE_LOTTERY, true)
+                + "\nToast提示=" + readSwitch(KEY_ENABLE_TOAST, true));
             switches.setTextSize(13);
             switches.setPadding(0, 12, 0, 0);
             layout.addView(switches);
