@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.util.TypedValue;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.text.SimpleDateFormat;
@@ -21,7 +22,12 @@ public class MainActivity extends Activity {
 
     private static final String SP_NAME = "quark_autosign_prefs";
     private static final String KEY_LAST_SIGN = "last_sign_time";
+    private static final String KEY_LAST_LOTTERY = "last_lottery_time";
     private static final String KEY_SIGN_HISTORY = "sign_history";
+    private static final String KEY_STATUS_LOG = "status_log";
+    private static final String KEY_ENABLE_SIGN = "enable_auto_sign";
+    private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
+    private static final String KEY_ENABLE_TOAST = "enable_toast";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,8 +45,9 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         // Summary
-        long lastSign = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                .getLong(KEY_LAST_SIGN, 0);
+        android.content.SharedPreferences sp = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+        long lastSign = sp.getLong(KEY_LAST_SIGN, 0);
+        long lastLottery = sp.getLong(KEY_LAST_LOTTERY, 0);
 
         TextView summary = new TextView(this);
         if (lastSign == 0) {
@@ -50,9 +57,41 @@ public class MainActivity extends Activity {
             String time = sdf.format(new Date(lastSign));
             summary.setText("上次签到时间：" + time + "\n状态：已签到\n");
         }
+        if (lastLottery > 0) {
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+            summary.append("上次抽奖时间：" + sdf.format(new Date(lastLottery)) + "\n");
+        }
         summary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         summary.setPadding(0, 20, 0, 20);
         root.addView(summary);
+
+        TextView switchHeader = new TextView(this);
+        switchHeader.setText("功能开关");
+        switchHeader.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        switchHeader.setTextColor(Color.BLACK);
+        switchHeader.setPadding(0, 0, 0, 12);
+        root.addView(switchHeader);
+
+        Switch signSwitch = new Switch(this);
+        signSwitch.setText("自动签到");
+        signSwitch.setChecked(sp.getBoolean(KEY_ENABLE_SIGN, true));
+        signSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
+            sp.edit().putBoolean(KEY_ENABLE_SIGN, isChecked).apply());
+        root.addView(signSwitch);
+
+        Switch lotterySwitch = new Switch(this);
+        lotterySwitch.setText("每日自动抽奖（3次）");
+        lotterySwitch.setChecked(sp.getBoolean(KEY_ENABLE_LOTTERY, true));
+        lotterySwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
+            sp.edit().putBoolean(KEY_ENABLE_LOTTERY, isChecked).apply());
+        root.addView(lotterySwitch);
+
+        Switch toastSwitch = new Switch(this);
+        toastSwitch.setText("Toast 提示");
+        toastSwitch.setChecked(sp.getBoolean(KEY_ENABLE_TOAST, true));
+        toastSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
+            sp.edit().putBoolean(KEY_ENABLE_TOAST, isChecked).apply());
+        root.addView(toastSwitch);
 
         // History header
         TextView historyHeader = new TextView(this);
@@ -62,8 +101,7 @@ public class MainActivity extends Activity {
         root.addView(historyHeader);
 
         // History list
-        String historyRaw = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_SIGN_HISTORY, "");
+        String historyRaw = sp.getString(KEY_SIGN_HISTORY, "");
 
         if (historyRaw.isEmpty()) {
             TextView empty = new TextView(this);
@@ -95,6 +133,30 @@ public class MainActivity extends Activity {
                 item.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
                 root.addView(item);
                 index++;
+            }
+        }
+
+        TextView logHeader = new TextView(this);
+        logHeader.setText("运行日志（最近20条）");
+        logHeader.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        logHeader.setTextColor(Color.BLACK);
+        logHeader.setPadding(0, 16, 0, 8);
+        root.addView(logHeader);
+
+        String logRaw = sp.getString(KEY_STATUS_LOG, "");
+        if (logRaw.isEmpty()) {
+            TextView emptyLog = new TextView(this);
+            emptyLog.setText("暂无日志");
+            root.addView(emptyLog);
+        } else {
+            String[] lines = logRaw.split("\\n");
+            int start = Math.max(0, lines.length - 20);
+            for (int i = start; i < lines.length; i++) {
+                TextView lineView = new TextView(this);
+                lineView.setText(lines[i]);
+                lineView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+                lineView.setPadding(0, 2, 0, 2);
+                root.addView(lineView);
             }
         }
 
