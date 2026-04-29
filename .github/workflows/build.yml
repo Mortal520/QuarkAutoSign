@@ -1,0 +1,74 @@
+name: Build Xposed Module
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Setup Gradle
+      run: |
+        # Download and install Gradle manually
+        wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
+        unzip -q gradle-8.5-bin.zip
+        export GRADLE_HOME=$PWD/gradle-8.5
+        export PATH=$GRADLE_HOME/bin:$PATH
+        gradle --version
+
+    - name: Build APK
+      run: |
+        export GRADLE_HOME=$PWD/gradle-8.5
+        export PATH=$GRADLE_HOME/bin:$PATH
+        # Create standard Android project structure if missing
+        mkdir -p app/src/main/java/com/qurk/autosign
+        mkdir -p app/src/main/assets
+        # Copy source files to app module
+        cp -r src/main/* app/src/main/ 2>/dev/null || true
+        # Run build
+        gradle assembleDebug
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: QuarkAutoSign-Debug
+        path: app/build/outputs/apk/debug/*.apk
+        retention-days: 30
+
+    - name: Release APK
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: v1.0.${{ github.run_number }}
+        name: QuarkAutoSign v1.0.${{ github.run_number }}
+        files: app/build/outputs/apk/debug/*.apk
+        body: |
+          夸克扫描王自动签到 Xposed 模块
+
+          ## 使用方法
+          1. 下载 APK
+          2. 安装到手机
+          3. 在 NPatch/FPA 中启用模块
+          4. 注入夸克扫描王 APP
+
+          ## 配合荣耀智慧空间实现全自动
+          1. 荣耀智慧空间新建场景
+          2. 触发条件：每天定时
+          3. 执行任务：打开夸克扫描王 → 等待15秒 → 返回桌面
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.qurk.autosign"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
+
+    <application
+        android:label="夸克扫描王自动签到"
+        android:icon="@android:drawable/ic_menu_today">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="夸克扫描王每日自动签到模块 - 无需修改APK" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+
+    </application>
+</manifest>
