@@ -379,7 +379,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
         tasksStarted = true;
         
-        // 延迟10秒执行，确保APP完全初始化
+        // 延迟5秒执行，确保APP完全初始化
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             try {
                 boolean signEnabled = readSwitch(KEY_ENABLE_SIGN, true);
@@ -435,106 +435,178 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     }
 
     private void doSignInSafe(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
-        new Thread(() -> {
+        // 在主线程执行，避免线程问题
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
             try {
-                Thread.sleep(2000); // 再延迟2秒，确保网络模块初始化
-                log(lpparam, "[签到] 正在获取 CameraCheckInManager...");
+                log(lpparam, "[签到] 开始执行...");
                 
                 Class<?> managerClass = XposedHelpers.findClass(
                     "com.ucpro.feature.study.userop.CameraCheckInManager",
                     ctx.getClassLoader()
                 );
+                log(lpparam, "[签到] CameraCheckInManager 类已找到");
 
-                Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
-                if (manager == null) {
-                    log(lpparam, "[签到] CameraCheckInManager 为 null");
-                    showToast(ctx, "签到失败：Manager为null");
-                    return;
-                }
-
-                log(lpparam, "[签到] 调用接口 m63476q...");
-                Object result = null;
+                // 获取单例 - 尝试多种方式
+                Object manager = null;
                 try {
-                    // 尝试正确的参数签名: (AbsWindow, String)
-                    result = XposedHelpers.callMethod(manager, "m63476q", null, "xposed_auto_sign");
+                    // 方式1: 带 null 参数
+                    manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
                 } catch (Throwable e1) {
                     try {
-                        // 尝试 Object[] 包装
-                        result = XposedHelpers.callMethod(manager, "m63476q", new Object[]{null, "xposed_auto_sign"});
+                        // 方式2: 不带参数
+                        manager = XposedHelpers.callStaticMethod(managerClass, "m63467i");
                     } catch (Throwable e2) {
-                        log(lpparam, "[签到] 调用失败: " + e2.getMessage());
-                        showToastOnce(ctx, "签到调用失败");
-                        return;
+                        log(lpparam, "[签到] 获取Manager失败: " + e2.getMessage());
                     }
                 }
                 
-                recordSignTime(ctx, "auto");
-                log(lpparam, "[签到] 触发成功，结果: " + (result != null ? result.toString() : "null"));
-                showToastOnce(ctx, "签到成功 ✓");
+                if (manager == null) {
+                    log(lpparam, "[签到] CameraCheckInManager 为 null");
+                    showToastOnce(ctx, "签到失败：Manager为null");
+                    return;
+                }
+                log(lpparam, "[签到] Manager 获取成功: " + manager.getClass().getName());
+
+                // 列出所有方法用于调试
+                log(lpparam, "[签到] 尝试调用签到方法...");
+                
+                // 尝试调用 m63476q - 模拟首页触发的方式
+                boolean success = false;
+                Object result = null;
+                
+                // 尝试方式1: (null, "main_page") - 模拟首页触发
+                try {
+                    result = XposedHelpers.callMethod(manager, "m63476q", null, "main_page");
+                    success = true;
+                    log(lpparam, "[签到] 方式1成功 (null, main_page)");
+                } catch (Throwable e1) {
+                    log(lpparam, "[签到] 方式1失败: " + e1.getMessage());
+                    
+                    // 尝试方式2: (null, "xposed_auto_sign")
+                    try {
+                        result = XposedHelpers.callMethod(manager, "m63476q", null, "xposed_auto_sign");
+                        success = true;
+                        log(lpparam, "[签到] 方式2成功 (null, xposed_auto_sign)");
+                    } catch (Throwable e2) {
+                        log(lpparam, "[签到] 方式2失败: " + e2.getMessage());
+                        
+                        // 尝试方式3: 找到方法并调用
+                        try {
+                            java.lang.reflect.Method[] methods = managerClass.getDeclaredMethods();
+                            for (java.lang.reflect.Method m : methods) {
+                                if (m.getName().equals("m63476q")) {
+                                    log(lpparam, "[签到] 找到方法: " + m.toGenericString());
+                                    m.setAccessible(true);
+                                    result = m.invoke(manager, new Object[]{null, "auto_sign"});
+                                    success = true;
+                                    log(lpparam, "[签到] 方式3反射成功");
+                                    break;
+                                }
+                            }
+                        } catch (Throwable e3) {
+                            log(lpparam, "[签到] 方式3失败: " + e3.getMessage());
+                        }
+                    }
+                }
+                
+                if (success) {
+                    recordSignTime(ctx, "auto");
+                    log(lpparam, "[签到] 执行完成，结果: " + (result != null ? result.toString() : "null"));
+                    showToastOnce(ctx, "签到已触发 ✓");
+                } else {
+                    log(lpparam, "[签到] 所有调用方式均失败");
+                    showToastOnce(ctx, "签到调用失败");
+                }
             } catch (Throwable e) {
-                String msg = "[签到] 异常: " + e.getMessage();
-                Log.e(TAG, msg);
+                String msg = "[签到] 异常: " + e.getClass().getName() + ": " + e.getMessage();
+                Log.e(TAG, msg, e);
                 log(lpparam, msg);
-                showToast(ctx, "签到异常");
+                showToastOnce(ctx, "签到异常");
             }
-        }).start();
+        }, 1500); // 延迟1.5秒，在总延迟5秒基础上再等待
     }
     
     private void doDailyLotterySafe(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
-        new Thread(() -> {
-            try {
-                Thread.sleep(3000); // 抽奖再延迟3秒
-                log(lpparam, "[抽奖] 开始每日抽奖，共" + DAILY_LOTTERY_TIMES + "次");
-                showToast(ctx, "开始自动抽奖");
-                
-                for (int i = 1; i <= DAILY_LOTTERY_TIMES; i++) {
-                    final int index = i;
-                    Thread.sleep(2000); // 每次抽奖间隔2秒
-                    
+        // 使用 Handler 在主线程顺序执行
+        Handler handler = new Handler(Looper.getMainLooper());
+        
+        handler.postDelayed(() -> {
+            log(lpparam, "[抽奖] 开始每日抽奖，共" + DAILY_LOTTERY_TIMES + "次");
+            showToastOnce(ctx, "开始自动抽奖");
+            
+            // 定义每轮抽奖任务
+            Runnable[] lotteryTasks = new Runnable[DAILY_LOTTERY_TIMES];
+            
+            for (int i = 0; i < DAILY_LOTTERY_TIMES; i++) {
+                final int index = i + 1;
+                lotteryTasks[i] = () -> {
                     try {
                         Class<?> managerClass = XposedHelpers.findClass(
                             "com.ucpro.feature.study.userop.CameraCheckInManager",
                             ctx.getClassLoader()
                         );
-                        Object manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
-                        if (manager == null) {
-                            log(lpparam, "[抽奖] 第" + index + "次失败：Manager为null");
-                            continue;
+                        
+                        Object manager = null;
+                        try {
+                            manager = XposedHelpers.callStaticMethod(managerClass, "m63467i", (Object) null);
+                        } catch (Throwable e) {
+                            manager = XposedHelpers.callStaticMethod(managerClass, "m63467i");
                         }
                         
-                        // 尝试调用抽奖方法
+                        if (manager == null) {
+                            log(lpparam, "[抽奖] 第" + index + "次失败：Manager为null");
+                            return;
+                        }
+                        
+                        // 获取所有方法并尝试找到抽奖方法
                         boolean triggered = false;
-                        String[] candidates = new String[]{"m63475p", "m63474o", "m63473n", "lottery", "drawLottery"};
-                        for (String method : candidates) {
-                            try {
-                                XposedHelpers.callMethod(manager, method);
-                                triggered = true;
-                                break;
-                            } catch (Throwable ignored) {
+                        java.lang.reflect.Method[] methods = managerClass.getDeclaredMethods();
+                        
+                        // 首先尝试已知的方法名
+                        String[] candidates = new String[]{"m63475p", "m63474o", "m63473n", "m63472m"};
+                        for (String methodName : candidates) {
+                            for (java.lang.reflect.Method m : methods) {
+                                if (m.getName().equals(methodName)) {
+                                    try {
+                                        m.setAccessible(true);
+                                        m.invoke(manager);
+                                        triggered = true;
+                                        log(lpparam, "[抽奖] 第" + index + "次调用 " + methodName + " 成功");
+                                        break;
+                                    } catch (Throwable e) {
+                                        log(lpparam, "[抽奖] 第" + index + "次 " + methodName + " 失败: " + e.getMessage());
+                                    }
+                                }
                             }
+                            if (triggered) break;
                         }
                         
                         if (triggered) {
                             recordSignTime(ctx, "lottery#" + index);
-                            log(lpparam, "[抽奖] 第" + index + "次请求已发送");
-                            showToastOnce(ctx, "抽奖" + index + "请求已发送");
+                            showToastOnce(ctx, "抽奖" + index + "已触发");
                         } else {
-                            log(lpparam, "[抽奖] 第" + index + "次未找到方法");
+                            log(lpparam, "[抽奖] 第" + index + "次未找到可用方法");
                         }
                     } catch (Throwable e) {
-                        log(lpparam, "[抽奖] 第" + index + "次异常: " + e.getMessage());
+                        log(lpparam, "[抽奖] 第" + index + "次异常: " + e.getClass().getName() + ": " + e.getMessage());
                     }
-                }
-                
-                // 记录抽奖完成时间
+                };
+            }
+            
+            // 顺序执行，每轮间隔3秒
+            for (int i = 0; i < DAILY_LOTTERY_TIMES; i++) {
+                handler.postDelayed(lotteryTasks[i], i * 3000L);
+            }
+            
+            // 最后记录完成
+            handler.postDelayed(() -> {
                 ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
                     .edit().putLong(KEY_LAST_LOTTERY, System.currentTimeMillis()).apply();
-                showToast(ctx, "抽奖执行完成");
-                
-            } catch (Throwable e) {
-                log(lpparam, "[抽奖] 整体异常: " + e.getMessage());
-            }
-        }).start();
+                log(lpparam, "[抽奖] 所有抽奖请求已发送");
+                showToastOnce(ctx, "抽奖执行完成");
+            }, DAILY_LOTTERY_TIMES * 3000L + 1000);
+            
+        }, 2500); // 签到后2.5秒开始抽奖
     }
 
     private void recordSignTime(Context ctx, String source) {
