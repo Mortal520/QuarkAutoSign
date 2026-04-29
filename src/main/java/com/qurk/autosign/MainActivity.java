@@ -18,6 +18,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
+import de.robv.android.xposed.XSharedPreferences;
+
 public class MainActivity extends Activity {
 
     private static final String SP_NAME = "quark_autosign_prefs";
@@ -29,9 +31,23 @@ public class MainActivity extends Activity {
     private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
 
+    private XSharedPreferences quarkPrefs;
+    
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        
+        // 初始化 XSharedPreferences 读取夸克APP的数据
+        quarkPrefs = new XSharedPreferences("com.quark.scanking", SP_NAME);
+        quarkPrefs.makeWorldReadable();
+        quarkPrefs.reload();
+        
+        // 同时支持旧包名
+        if (!quarkPrefs.getAll().containsKey(KEY_LAST_SIGN)) {
+            quarkPrefs = new XSharedPreferences("com.quark.scank", SP_NAME);
+            quarkPrefs.makeWorldReadable();
+            quarkPrefs.reload();
+        }
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -44,8 +60,10 @@ public class MainActivity extends Activity {
         title.setTextColor(Color.BLACK);
         root.addView(title);
 
-        // Summary
+        // Summary - 优先从夸克APP读取，如果没有则从模块读取
         android.content.SharedPreferences sp = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+        long quarkLastSign = quarkPrefs.getLong(KEY_LAST_SIGN, 0);
+        long quarkLastLottery = quarkPrefs.getLong(KEY_LAST_LOTTERY, 0);
         long lastSign = sp.getLong(KEY_LAST_SIGN, 0);
         long lastLottery = sp.getLong(KEY_LAST_LOTTERY, 0);
 
@@ -137,13 +155,19 @@ public class MainActivity extends Activity {
         }
 
         TextView logHeader = new TextView(this);
-        logHeader.setText("运行日志（最近20条）");
+        logHeader.setText("运行日志（最近20条）- 来自夸克APP");
         logHeader.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         logHeader.setTextColor(Color.BLACK);
         logHeader.setPadding(0, 16, 0, 8);
         root.addView(logHeader);
 
-        String logRaw = sp.getString(KEY_STATUS_LOG, "");
+        // 使用 XSharedPreferences 读取夸克APP的日志
+        quarkPrefs.reload();
+        String logRaw = quarkPrefs.getString(KEY_STATUS_LOG, "");
+        if (logRaw.isEmpty()) {
+            // 如果没有夸克日志，尝试读取模块自己的日志作为备选
+            logRaw = sp.getString(KEY_STATUS_LOG, "");
+        }
         if (logRaw.isEmpty()) {
             TextView emptyLog = new TextView(this);
             emptyLog.setText("暂无日志");
