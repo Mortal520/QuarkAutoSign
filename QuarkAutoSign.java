@@ -70,42 +70,48 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     }
     
     private void hookMainActivity(XC_LoadPackage.LoadPackageParam lpparam) {
-        // Hook 夸克首页 Activity，在页面显示时触发签到（此时APP已完全初始化）
-        String[] mainActivities = new String[]{
-            "com.scanking.homepage.view.main.SKMainActivity",
-            "com.scanking.homepage.SKMainActivity",
-            "com.quark.scanking.MainActivity",
-            "com.ucpro.MainActivity",
-            "com.quark.scanking.homepage.MainActivity"
-        };
-        
-        for (String actName : mainActivities) {
-            try {
-                Class<?> actClass = XposedHelpers.findClass(actName, lpparam.classLoader);
-                XposedHelpers.findAndHookMethod(actClass, "onResume", new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Activity activity = (Activity) param.thisObject;
-                        Context ctx = activity.getApplicationContext();
-                        
-                        // 只显示一次Hook成功的Toast
-                        if (!hookToastShown) {
-                            hookToastShown = true;
-                            showToastOnce(ctx, "模块已激活");
-                            log(lpparam, "Hook主页成功: " + actName);
-                        }
-                        
-                        // 执行签到/抽奖任务
-                        performAutoTasks(ctx, lpparam);
+        // 先Hook所有Activity的onResume来调试找到正确的类名
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onResume", new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                    Activity activity = (Activity) param.thisObject;
+                    String className = activity.getClass().getName();
+                    // 记录所有Activity的onResume，帮助调试
+                    if (!className.startsWith("android.")) {
+                        Log.d(TAG, "Activity onResume: " + className);
                     }
-                });
-                log(lpparam, "已Hook主页: " + actName);
-                return; // 成功Hook一个就返回
-            } catch (Throwable e) {
-                // 尝试下一个
-            }
+                }
+                
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                    Activity activity = (Activity) param.thisObject;
+                    String className = activity.getClass().getName();
+                    Context ctx = activity.getApplicationContext();
+                    
+                    // 只处理夸克相关Activity
+                    if (!className.contains("quark") && !className.contains("scanking") && !className.contains("ucpro")) {
+                        return;
+                    }
+                    
+                    Log.i(TAG, "Hooked Activity: " + className);
+                    log(lpparam, "Hooked Activity: " + className);
+                    
+                    // 只显示一次Hook成功的Toast
+                    if (!hookToastShown) {
+                        hookToastShown = true;
+                        showToastOnce(ctx, "模块已激活: " + className);
+                        log(lpparam, "首次Hook成功: " + className);
+                    }
+                    
+                    // 执行签到/抽奖任务（只执行一次）
+                    performAutoTasks(ctx, lpparam);
+                }
+            });
+            log(lpparam, "已Hook所有Activity.onResume用于调试");
+        } catch (Throwable e) {
+            log(lpparam, "Hook Activity.onResume失败: " + e.getMessage());
         }
-        log(lpparam, "未找到主页Activity，回退到Application Hook");
     }
     
     private void hookLotteryResult(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -209,7 +215,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     }
 
     private void hookApplication(XC_LoadPackage.LoadPackageParam lpparam) {
-        // 只用于初始化，不触发任务（任务在Activity onResume触发）
+        // 用于初始化和显示测试Toast
         try {
             XposedHelpers.findAndHookMethod(
                 Application.class.getName(),
@@ -219,8 +225,15 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         Application app = (Application) param.thisObject;
-                        Context ctx = app.getApplicationContext();
-                        log(lpparam, "Application.onCreate Hook成功");
+                        final Context ctx = app.getApplicationContext();
+                        
+                        log(lpparam, "Application.onCreate Hook成功 - 包名: " + lpparam.packageName);
+                        
+                        // 延迟显示测试Toast，确认模块确实运行
+                        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                            showToastOnce(ctx, "模块已加载");
+                            Log.i(TAG, "Test Toast shown");
+                        }, 3000);
                     }
                 }
             );
@@ -480,68 +493,124 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }, 3000);
     }
     
-    // 简化版签到 - 直接反射调用，更稳定
+    // 简化版签到 - 带详细调试
     private boolean doSignInSimple(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
+            log(lpparam, "开始签到...");
+            
             Class<?> mgrClass = XposedHelpers.findClass(
                 "com.ucpro.feature.study.userop.CameraCheckInManager", 
                 ctx.getClassLoader()
             );
+            log(lpparam, "找到CameraCheckInManager类");
             
-            // 获取实例
-            Object mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i", new Class<?>[]{Class.forName("com.uc.webview.export.extension.AbsWindow", false, ctx.getClassLoader())}, (Object) null);
-            if (mgr == null) {
-                // 尝试无参获取
+            // 列出所有方法帮助调试
+            java.lang.reflect.Method[] allMethods = mgrClass.getDeclaredMethods();
+            log(lpparam, "类共有 " + allMethods.length + " 个方法");
+            
+            // 获取实例 - 多种方式尝试
+            Object mgr = null;
+            try {
                 mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i");
+                log(lpparam, "获取Manager成功(无参)");
+            } catch (Throwable e1) {
+                log(lpparam, "无参获取失败: " + e1.getMessage());
+                try {
+                    mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i", (Object) null);
+                    log(lpparam, "获取Manager成功(null)");
+                } catch (Throwable e2) {
+                    log(lpparam, "null获取失败: " + e2.getMessage());
+                }
             }
+            
             if (mgr == null) {
-                log(lpparam, "签到失败：无法获取Manager");
+                log(lpparam, "签到失败：无法获取Manager实例");
                 return false;
             }
             
-            // 调用签到
-            XposedHelpers.callMethod(mgr, "m63476q", null, "xposed_hook");
-            recordSignTime(ctx, "auto");
-            showToastOnce(ctx, "签到已触发 ✓");
-            return true;
+            // 调用签到 - 尝试多种方式
+            boolean success = false;
+            String[] signMethods = {"m63476q", "checkIn", "doCheckIn", "requestCheckIn"};
+            for (String methodName : signMethods) {
+                for (java.lang.reflect.Method m : allMethods) {
+                    if (m.getName().equals(methodName)) {
+                        try {
+                            m.setAccessible(true);
+                            m.invoke(mgr, null, "auto");
+                            success = true;
+                            log(lpparam, "签到调用成功: " + methodName);
+                            break;
+                        } catch (Throwable e) {
+                            log(lpparam, methodName + " 调用失败: " + e.getMessage());
+                        }
+                    }
+                }
+                if (success) break;
+            }
+            
+            if (success) {
+                recordSignTime(ctx, "auto");
+                showToastOnce(ctx, "签到已触发 ✓");
+                return true;
+            } else {
+                log(lpparam, "所有签到方法均失败");
+                return false;
+            }
         } catch (Throwable e) {
-            log(lpparam, "签到失败: " + e.getMessage());
+            log(lpparam, "签到异常: " + e.getClass().getName() + " - " + e.getMessage());
             return false;
         }
     }
     
-    // 简化版抽奖
+    // 简化版抽奖 - 带详细调试
     private boolean doLotterySimple(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         int successCount = 0;
         try {
+            log(lpparam, "开始抽奖...");
+            
             Class<?> mgrClass = XposedHelpers.findClass(
                 "com.ucpro.feature.study.userop.CameraCheckInManager", 
                 ctx.getClassLoader()
             );
+            java.lang.reflect.Method[] allMethods = mgrClass.getDeclaredMethods();
             
             for (int i = 1; i <= DAILY_LOTTERY_TIMES; i++) {
                 try {
-                    Thread.sleep(1500);
+                    Thread.sleep(2000);
                     
-                    Object mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i", new Class<?>[]{Class.forName("com.uc.webview.export.extension.AbsWindow", false, ctx.getClassLoader())}, (Object) null);
-                    if (mgr == null) {
+                    Object mgr = null;
+                    try {
                         mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i");
+                    } catch (Throwable e) {
+                        mgr = XposedHelpers.callStaticMethod(mgrClass, "m63467i", (Object) null);
                     }
-                    if (mgr == null) continue;
+                    if (mgr == null) {
+                        log(lpparam, "抽奖" + i + ": Manager为null");
+                        continue;
+                    }
                     
-                    // 尝试抽奖方法
-                    String[] methods = {"m63475p", "m63474o", "m63473n"};
-                    for (String method : methods) {
-                        try {
-                            XposedHelpers.callMethod(mgr, method);
-                            recordSignTime(ctx, "lottery#" + i);
-                            successCount++;
-                            showToastOnce(ctx, "抽奖" + i + "已触发");
-                            break;
-                        } catch (Throwable ignored) {}
+                    // 尝试所有无参方法
+                    boolean triggered = false;
+                    for (java.lang.reflect.Method m : allMethods) {
+                        if (m.getParameterCount() == 0 && !m.getName().startsWith("get") && !m.getName().startsWith("is")) {
+                            try {
+                                m.setAccessible(true);
+                                m.invoke(mgr);
+                                triggered = true;
+                                log(lpparam, "抽奖" + i + "成功调用: " + m.getName());
+                                recordSignTime(ctx, "lottery#" + i);
+                                successCount++;
+                                showToastOnce(ctx, "抽奖" + i + "已触发");
+                                break;
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                    
+                    if (!triggered) {
+                        log(lpparam, "抽奖" + i + ": 未找到可用方法");
                     }
                 } catch (Throwable e) {
-                    log(lpparam, "抽奖" + i + "失败: " + e.getMessage());
+                    log(lpparam, "抽奖" + i + "异常: " + e.getMessage());
                 }
             }
             
@@ -549,10 +618,13 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                 ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE)
                     .edit().putLong(KEY_LAST_LOTTERY, System.currentTimeMillis()).apply();
                 showToastOnce(ctx, "抽奖完成 (" + successCount + "/" + DAILY_LOTTERY_TIMES + ")");
+                log(lpparam, "抽奖全部完成");
                 return true;
+            } else {
+                log(lpparam, "抽奖全部失败");
             }
         } catch (Throwable e) {
-            log(lpparam, "抽奖整体失败: " + e.getMessage());
+            log(lpparam, "抽奖整体异常: " + e.getMessage());
         }
         return false;
     }
