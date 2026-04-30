@@ -45,6 +45,8 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static final int MAX_HISTORY = 30;
     private static final int MAX_LOG = 50;
     private static final int DAILY_LOTTERY_TIMES = 3;
+    private static final int SIGN_RETRY_TIMES = 3;
+    private static final long SIGN_RETRY_INTERVAL_MS = 12000L;
     
     // 静态变量防止跨实例重复
     private static volatile boolean hookToastShown = false;
@@ -78,8 +80,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
     
-    private static volatile boolean signSucceededToday = false;
-    
     private void hookSignInMethod(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             Class<?> mgrClass = XposedHelpers.findClass(
@@ -109,23 +109,11 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                             
                             String source = param.args[1] != null ? param.args[1].toString() : "unknown";
                             log(lpparam, "签到方法被调用 来源=" + source);
-                            recordSignTime(ctx, source);
-                            signSucceededToday = true;
                             
                             // 显示Toast（只显示一次）
                             if (!hookToastShown) {
                                 hookToastShown = true;
                                 showToastOnce(ctx, "签到已触发 ✓");
-                            }
-                            
-                            // 签到成功后自动触发抽奖
-                            if (readSwitch(KEY_ENABLE_LOTTERY, true)) {
-                                android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-                                if (shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0))) {
-                                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                        doLotterySimple(ctx, lpparam);
-                                    }, 5000);
-                                }
                             }
                         }
                     });
@@ -379,36 +367,51 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         tasksExecutedToday = true;
         tasksExecutedDay = today;
         
-        // 这是补强逻辑：APP自己会调用签到，但如果失败或未触发，我们在这里补强
-        // 等待15秒 - 给APP自己足够时间完成签到
+        // 补强逻辑：APP自己会调用签到，但存在偶发失败，模块做重试触发
+        // 等待15秒，先让APP自身流程跑完，再开始补强
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             try {
                 boolean signEnabled = readSwitch(KEY_ENABLE_SIGN, true);
                 boolean lotteryEnabled = readSwitch(KEY_ENABLE_LOTTERY, true);
                 
-                android.content.SharedPreferences quarkSp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-                
-                // 补强签到：检查Hook是否已经拦截到签到
-                if (signEnabled && !signSucceededToday) {
-                    long lastSign = quarkSp.getLong(KEY_LAST_SIGN, 0);
-                    if (shouldDoToday(lastSign)) {
-                        log(lpparam, "补强签到: APP未自动完成，主动触发");
-                        doSignInSimple(ctx, lpparam);
-                    }
+                if (signEnabled) {
+                    log(lpparam, "开始补强签到重试，共" + SIGN_RETRY_TIMES + "次");
+                    triggerSignInWithRetries(ctx, lpparam, 1);
                 }
 
-                // 补强抽奖
+                // 补强抽奖：在签到重试阶段后执行
                 if (lotteryEnabled) {
-                    long lastLottery = quarkSp.getLong(KEY_LAST_LOTTERY, 0);
-                    if (shouldDoToday(lastLottery)) {
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         log(lpparam, "补强抽奖: 主动触发");
                         doLotterySimple(ctx, lpparam);
-                    }
+                    }, SIGN_RETRY_TIMES * SIGN_RETRY_INTERVAL_MS + 5000L);
                 }
             } catch (Throwable e) {
                 Log.e(TAG, "performAutoTasks error: " + e.getMessage());
             }
         }, 15000); // 15秒后补强
+    }
+
+    private void triggerSignInWithRetries(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, int attempt) {
+        if (attempt > SIGN_RETRY_TIMES) {
+            return;
+        }
+        try {
+            boolean triggered = doSignInSimple(ctx, lpparam);
+            log(lpparam, "补强签到第" + attempt + "次: " + (triggered ? "已触发" : "未触发"));
+            if (triggered) {
+                recordSignTime(ctx, "retry#" + attempt);
+            }
+        } catch (Throwable e) {
+            log(lpparam, "补强签到第" + attempt + "次异常: " + e.getMessage());
+        }
+
+        if (attempt < SIGN_RETRY_TIMES) {
+            new Handler(Looper.getMainLooper()).postDelayed(() ->
+                triggerSignInWithRetries(ctx, lpparam, attempt + 1),
+                SIGN_RETRY_INTERVAL_MS
+            );
+        }
     }
     
     // 补强签到 - 在APP自己的签到失败时主动触发
