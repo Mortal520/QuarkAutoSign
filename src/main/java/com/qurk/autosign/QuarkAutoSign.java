@@ -8,6 +8,10 @@ import android.util.Log;
 import android.webkit.ValueCallback;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -15,6 +19,8 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+
+import javax.net.ssl.HttpsURLConnection;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -30,14 +36,21 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static final String TARGET_PKG_LEGACY = "com.quark.scank";
     private static final String SP_NAME = "quark_autosign_prefs";
     private static final String KEY_LAST_SIGN = "last_sign_time";
+    private static final String KEY_LAST_LOTTERY = "last_lottery_time";
+    private static final String KEY_LOTTERY_COUNT = "lottery_count_today";
     private static final String KEY_SIGN_HISTORY = "sign_history";
     private static final String KEY_STATUS_LOG = "status_log";
     private static final String KEY_ENABLE_SIGN = "enable_auto_sign";
+    private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
     private static final int MAX_HISTORY = 30;
     private static final int MAX_LOG = 50;
     private static final int SIGN_RETRY_TIMES = 3;
+    private static final int DAILY_LOTTERY_TIMES = 3;
     private static final long SIGN_RETRY_INTERVAL_MS = 10000L;
+    private static final String LOTTERY_URL = "https://scan-order.quark.cn/api/lottery/v1/lottery";
+    private static final String AUTH_REQ_CLASS = "iq0.g";  // 签到请求类，继承 iq0.d
+    private static final String AUTH_BUILD_METHOD = "e";   // iq0.d.e() 构建含token的auth JSON
 
     // CameraCheckInManager 的实际字节码方法/字段名
     private static final String MGR_CLASS = "com.ucpro.feature.study.userop.CameraCheckInManager";
@@ -53,6 +66,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static volatile boolean hookToastShown = false;
     private static volatile boolean signDetectedToday = false;
     private static volatile boolean tasksScheduled = false;
+    private static volatile int lotteryDoneToday = 0;
     private static volatile long lastToastTime = 0;
     private static volatile String lastToastMsg = "";
 
@@ -161,21 +175,13 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                             return; // 跳过基类，等自定义Application
                         }
 
-                        // 显示一次Toast确认模块已加载
-                        android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-                        if (shouldDoToday(sp.getLong("last_module_toast", 0))) {
-                            sp.edit().putLong("last_module_toast", System.currentTimeMillis()).apply();
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                showToastOnce(ctx, "模块已激活");
-                            }, 3000);
-                        }
-
-                        // 延迟触发签到补强
+                        // 延迟检测状态并执行任务
                         if (!tasksScheduled) {
                             tasksScheduled = true;
+                            // 3秒后检查状态并弹窗提醒，然后立即执行需要的任务
                             new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                performAutoSignIn(ctx, lpparam);
-                            }, 15000);
+                                checkStatusAndExecute(ctx, lpparam);
+                            }, 3000);
                         }
                     }
                 }
@@ -186,37 +192,92 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    // ==================== 签到补强逻辑 ====================
+    // ==================== 状态检查与执行 ====================
 
-    private void performAutoSignIn(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+    private void checkStatusAndExecute(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            boolean signEnabled = readSwitch(KEY_ENABLE_SIGN, true);
-            if (!signEnabled) {
-                log(lpparam, "自动签到已关闭");
-                return;
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            boolean needSign = readSwitch(KEY_ENABLE_SIGN, true)
+                && shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))
+                && !signDetectedToday;
+            boolean lotteryEnabled = readSwitch(KEY_ENABLE_LOTTERY, true);
+            boolean lotteryDone = !shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
+            int lotteryProgress = shouldDoToday(sp.getLong("lottery_progress_day", 0))
+                ? 0 : sp.getInt(KEY_LOTTERY_COUNT, 0);
+            boolean needLottery = lotteryEnabled && !lotteryDone && lotteryProgress < DAILY_LOTTERY_TIMES;
+            int lotteryRemain = DAILY_LOTTERY_TIMES - lotteryProgress;
+
+            // 构建状态摘要
+            StringBuilder status = new StringBuilder("模块已检查 | ");
+            if (needSign) {
+                status.append("今日未签到");
+            } else {
+                status.append("已签到");
+            }
+            status.append(" | ");
+            if (lotteryDone) {
+                status.append("抽奖已完成");
+            } else if (needLottery) {
+                status.append("抽奖剩余" + lotteryRemain + "次");
+            } else if (!lotteryEnabled) {
+                status.append("抽奖已关闭");
+            } else {
+                status.append("抽奖已完成");
             }
 
+            log(lpparam, status.toString());
+            showToastOnce(ctx, status.toString());
+
+            // 执行任务：先签到，签到完成后立即抽奖
+            if (needSign) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performAutoSignIn(ctx, lpparam, needLottery);
+                }, 2000);
+            } else if (needLottery) {
+                // 无需签到，直接抽奖
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performAutoLottery(ctx, lpparam);
+                }, 2000);
+            }
+        } catch (Throwable e) {
+            log(lpparam, "状态检查异常: " + e.getMessage());
+        }
+    }
+
+    // ==================== 签到补强逻辑 ====================
+
+    private void performAutoSignIn(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, boolean chainLottery) {
+        try {
             android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
             if (!shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))) {
                 log(lpparam, "今日已签到，跳过补强");
+                if (chainLottery) performAutoLottery(ctx, lpparam);
                 return;
             }
-
             if (signDetectedToday) {
                 log(lpparam, "Hook已检测到签到，跳过补强");
+                if (chainLottery) performAutoLottery(ctx, lpparam);
                 return;
             }
 
             log(lpparam, "开始签到补强（" + SIGN_RETRY_TIMES + "次重试）");
-            doSignInRetry(ctx, lpparam, 1);
+            doSignInRetry(ctx, lpparam, 1, chainLottery);
 
         } catch (Throwable e) {
             Log.e(TAG, "performAutoSignIn error: " + e.getMessage());
+            if (chainLottery) performAutoLottery(ctx, lpparam);
         }
     }
 
-    private void doSignInRetry(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, int attempt) {
-        if (attempt > SIGN_RETRY_TIMES || signDetectedToday) return;
+    private void doSignInRetry(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, int attempt, boolean chainLottery) {
+        if (attempt > SIGN_RETRY_TIMES || signDetectedToday) {
+            if (chainLottery) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performAutoLottery(ctx, lpparam);
+                }, 3000);
+            }
+            return;
+        }
 
         log(lpparam, "补强签到第" + attempt + "次...");
         boolean ok = doSignIn(ctx, lpparam);
@@ -224,13 +285,24 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         if (ok) {
             recordSignTime(ctx, "retry#" + attempt);
             showToastOnce(ctx, "补强签到成功 ✓");
+            // 签到成功后3秒后开始抽奖
+            if (chainLottery) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performAutoLottery(ctx, lpparam);
+                }, 3000);
+            }
             return;
         }
 
         if (attempt < SIGN_RETRY_TIMES) {
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                doSignInRetry(ctx, lpparam, attempt + 1);
+                doSignInRetry(ctx, lpparam, attempt + 1, chainLottery);
             }, SIGN_RETRY_INTERVAL_MS);
+        } else if (chainLottery) {
+            // 签到全部失败，继续尝试抽奖
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                performAutoLottery(ctx, lpparam);
+            }, 3000);
         }
     }
 
@@ -329,6 +401,205 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         } catch (Throwable e) {
             log(lpparam, "直接签到异常: " + e.getMessage());
             return false;
+        }
+    }
+
+    // ==================== 抽奖逻辑 ====================
+
+    private void performAutoLottery(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            if (!readSwitch(KEY_ENABLE_LOTTERY, true)) {
+                log(lpparam, "自动抽奖已关闭");
+                return;
+            }
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            if (!shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0))) {
+                log(lpparam, "今日已完成抽奖");
+                return;
+            }
+            // 检查是否有未完成的抽奖（app中途重启时恢复）
+            int doneSoFar = shouldDoToday(sp.getLong("lottery_progress_day", 0))
+                ? 0 : sp.getInt(KEY_LOTTERY_COUNT, 0);
+            lotteryDoneToday = doneSoFar;
+            int startDraw = doneSoFar + 1;
+            if (startDraw > DAILY_LOTTERY_TIMES) {
+                log(lpparam, "今日抽奖已全部完成");
+                markLotteryDone(ctx);
+                return;
+            }
+            log(lpparam, "开始自动抽奖（每日" + DAILY_LOTTERY_TIMES + "次免费），从第" + startDraw + "次开始");
+            doLotterySequence(ctx, lpparam, startDraw);
+        } catch (Throwable e) {
+            log(lpparam, "抽奖启动异常: " + e.getMessage());
+        }
+    }
+
+    private void doLotterySequence(Context ctx, XC_LoadPackage.LoadPackageParam lpparam, int drawNum) {
+        if (drawNum > DAILY_LOTTERY_TIMES) {
+            log(lpparam, "抽奖完成: " + lotteryDoneToday + "/" + DAILY_LOTTERY_TIMES);
+            showToastOnce(ctx, "抽奖完成 (" + lotteryDoneToday + "/" + DAILY_LOTTERY_TIMES + ")");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                // 每次抽奖间隔3~5秒（防风控）
+                if (drawNum > 1) Thread.sleep(3000 + (long)(Math.random() * 2000));
+                String result = doSingleLotteryDraw(ctx, lpparam);
+                log(lpparam, "抽奖第" + drawNum + "次: " + result);
+
+                if (result.startsWith("ok:")) {
+                    lotteryDoneToday++;
+                    saveLotteryProgress(ctx, lotteryDoneToday);
+                    recordSignTime(ctx, "lottery#" + drawNum);
+                    String prize = result.length() > 3 ? result.substring(3) : "";
+                    showToastOnce(ctx, "抽奖" + drawNum + "成功" + (prize.isEmpty() ? "" : ": " + prize));
+                    if (drawNum >= DAILY_LOTTERY_TIMES) {
+                        // 全部完成
+                        markLotteryDone(ctx);
+                        log(lpparam, "抽奖全部完成 " + lotteryDoneToday + "/" + DAILY_LOTTERY_TIMES);
+                        showToastOnce(ctx, "今日抽奖全部完成");
+                    } else {
+                        // 继续下一次
+                        new Handler(Looper.getMainLooper()).post(() ->
+                            doLotterySequence(ctx, lpparam, drawNum + 1));
+                    }
+                } else if (result.startsWith("no_chance")) {
+                    log(lpparam, "抽奖次数已用完");
+                    showToastOnce(ctx, "今日抽奖次数已用完");
+                    markLotteryDone(ctx);
+                } else {
+                    log(lpparam, "抽奖失败停止: " + result);
+                    showToastOnce(ctx, "抽奖失败: " + result);
+                }
+            } catch (Throwable e) {
+                log(lpparam, "抽奖线程异常: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    private String doSingleLotteryDraw(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            // 用 iq0.g (签到请求类) 的父类 iq0.d 的 e() 方法构建含token的auth JSON
+            Class<?> reqClass = XposedHelpers.findClass(AUTH_REQ_CLASS, ctx.getClassLoader());
+            Object reqInst = reqClass.getConstructor().newInstance();
+            Class<?> baseClass = reqClass.getSuperclass(); // iq0.d
+
+            java.lang.reflect.Method authBuild = findMethodBySignature(baseClass, AUTH_BUILD_METHOD, 0);
+            if (authBuild == null) {
+                // 备选：找无参且返回JSONObject的方法
+                for (java.lang.reflect.Method m : baseClass.getDeclaredMethods()) {
+                    if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("JSON")) {
+                        authBuild = m;
+                        break;
+                    }
+                }
+            }
+            if (authBuild == null) return "error:找不到auth构建方法";
+            authBuild.setAccessible(true);
+            Object authJson = authBuild.invoke(reqInst);
+            if (authJson == null) return "error:auth构建返回null";
+
+            // 通过反射向 fastjson JSONObject 添加抽奖参数
+            java.lang.reflect.Method putM = authJson.getClass().getMethod("put", String.class, Object.class);
+            putM.invoke(authJson, "isCoin", Boolean.FALSE);
+            putM.invoke(authJson, "pay_entry", "daily_lottery");
+            putM.invoke(authJson, "pay_source", "daily_lottery");
+            putM.invoke(authJson, "awardForTest", "");
+
+            // 序列化为JSON字符串
+            java.lang.reflect.Method toStr = authJson.getClass().getMethod("toJSONString");
+            String bodyStr = (String) toStr.invoke(authJson);
+            log(lpparam, "抽奖请求构建完成, body长度=" + bodyStr.length());
+
+            // HTTPS POST
+            URL url = new URL(LOTTERY_URL);
+            HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "*/*");
+            conn.setRequestProperty("Origin", "https://vt.quark.cn");
+            conn.setRequestProperty("Referer", "https://vt.quark.cn/");
+            conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(15000);
+
+            OutputStream os = conn.getOutputStream();
+            os.write(bodyStr.getBytes("UTF-8"));
+            os.flush();
+            os.close();
+
+            int httpCode = conn.getResponseCode();
+            InputStream is = (httpCode >= 200 && httpCode < 400)
+                ? conn.getInputStream() : conn.getErrorStream();
+
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[2048];
+            int len;
+            while ((len = is.read(buf)) != -1) baos.write(buf, 0, len);
+            String resp = baos.toString("UTF-8");
+            conn.disconnect();
+
+            log(lpparam, "抽奖响应: HTTP" + httpCode + " len=" + resp.length());
+
+            if (httpCode != 200) return "http_error:" + httpCode;
+
+            // 解析响应 (用android标准JSONObject)
+            org.json.JSONObject json = new org.json.JSONObject(resp);
+            int code = json.optInt("code", -1);
+            int status = json.optInt("status", -1);
+            String msg = json.optString("msg", "");
+
+            if (code != 0) return "server_error:code=" + code + ",msg=" + msg;
+
+            org.json.JSONObject data = json.optJSONObject("data");
+            if (data == null) return "ok:";
+
+            int lotteryCount = data.optInt("lotteryCount", 0);
+            // 解析奖品
+            String prize = "";
+            if (data.has("couponList")) {
+                org.json.JSONArray coupons = data.optJSONArray("couponList");
+                if (coupons != null && coupons.length() > 0) {
+                    org.json.JSONObject coupon = coupons.getJSONObject(0);
+                    prize = coupon.optString("metaName", coupon.optString("productName", ""));
+                }
+            }
+            int coins = data.optInt("validCoins", 0);
+            String info = prize;
+            if (coins > 0) info += (info.isEmpty() ? "" : ",") + "金币:" + coins;
+            log(lpparam, "抽奖成功 剩余次数=" + lotteryCount + " 奖品=" + info);
+
+            if (lotteryCount <= 0) return "no_chance";
+            return "ok:" + info;
+
+        } catch (Throwable e) {
+            Log.e(TAG, "doSingleLotteryDraw", e);
+            return "exception:" + e.getMessage();
+        }
+    }
+
+    private void saveLotteryProgress(Context ctx, int completed) {
+        try {
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            sp.edit()
+                .putInt(KEY_LOTTERY_COUNT, completed)
+                .putLong("lottery_progress_day", System.currentTimeMillis())
+                .apply();
+        } catch (Exception e) {
+            Log.e(TAG, "saveLotteryProgress: " + e.getMessage());
+        }
+    }
+
+    private void markLotteryDone(Context ctx) {
+        try {
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            sp.edit()
+                .putLong(KEY_LAST_LOTTERY, System.currentTimeMillis())
+                .putInt(KEY_LOTTERY_COUNT, lotteryDoneToday)
+                .apply();
+        } catch (Exception e) {
+            Log.e(TAG, "markLotteryDone: " + e.getMessage());
         }
     }
 
@@ -473,9 +744,23 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             list.add(line);
             while (list.size() > MAX_LOG) list.remove(0);
             sp.edit().putString(KEY_STATUS_LOG, String.join("\n", list)).apply();
+            makePrefsWorldReadable(ctx);
         } catch (Exception e) {
             // ignore
         }
+    }
+
+    private void makePrefsWorldReadable(Context ctx) {
+        try {
+            java.io.File prefsDir = new java.io.File(
+                ctx.getFilesDir().getParentFile(), "shared_prefs");
+            prefsDir.setExecutable(true, false);
+            prefsDir.setReadable(true, false);
+            java.io.File prefsFile = new java.io.File(prefsDir, SP_NAME + ".xml");
+            if (prefsFile.exists()) {
+                prefsFile.setReadable(true, false);
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void showToastOnce(Context ctx, String msg) {

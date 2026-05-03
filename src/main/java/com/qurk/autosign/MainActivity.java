@@ -25,7 +25,10 @@ public class MainActivity extends Activity {
     private static final String KEY_LAST_SIGN = "last_sign_time";
     private static final String KEY_SIGN_HISTORY = "sign_history";
     private static final String KEY_STATUS_LOG = "status_log";
+    private static final String KEY_LAST_LOTTERY = "last_lottery_time";
+    private static final String KEY_LOTTERY_COUNT = "lottery_count_today";
     private static final String KEY_ENABLE_SIGN = "enable_auto_sign";
+    private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
 
     // 尝试通过反射使用 XSharedPreferences，避免直接引用导致崩溃
@@ -67,7 +70,17 @@ public class MainActivity extends Activity {
             String time = sdf.format(new Date(lastSign));
             summary.setText("上次签到时间：" + time + "\n状态：已签到\n");
         }
-        summary.append("\n注：抽奖为H5网页功能，需在签到页面手动操作");
+        // 抽奖状态
+        long lastLottery = Math.max(getQuarkLong(KEY_LAST_LOTTERY, 0), sp.getLong(KEY_LAST_LOTTERY, 0));
+        if (lastLottery > 0) {
+            SimpleDateFormat sdf2 = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+            summary.append("\n上次抽奖：" + sdf2.format(new Date(lastLottery)));
+            int lotteryCount = sp.getInt(KEY_LOTTERY_COUNT, 0);
+            if (lotteryCount > 0) summary.append("（" + lotteryCount + "/3次）");
+        } else {
+            summary.append("\n抽奖：尚未执行");
+        }
+        summary.append("\n\n每日3次免费抽奖，模块自动执行");
         summary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         summary.setPadding(0, 20, 0, 20);
         root.addView(summary);
@@ -85,6 +98,13 @@ public class MainActivity extends Activity {
         signSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
             sp.edit().putBoolean(KEY_ENABLE_SIGN, isChecked).apply());
         root.addView(signSwitch);
+
+        Switch lotterySwitch = new Switch(this);
+        lotterySwitch.setText("自动抽奖（每日3次免费）");
+        lotterySwitch.setChecked(sp.getBoolean(KEY_ENABLE_LOTTERY, true));
+        lotterySwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
+            sp.edit().putBoolean(KEY_ENABLE_LOTTERY, isChecked).apply());
+        root.addView(lotterySwitch);
 
         Switch toastSwitch = new Switch(this);
         toastSwitch.setText("Toast 提示");
@@ -165,6 +185,29 @@ public class MainActivity extends Activity {
                 root.addView(lineView);
             }
         }
+
+        // 诊断提示
+        TextView diagHeader = new TextView(this);
+        diagHeader.setText("模块诊断");
+        diagHeader.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        diagHeader.setTextColor(Color.BLACK);
+        diagHeader.setPadding(0, 20, 0, 8);
+        root.addView(diagHeader);
+
+        TextView diagInfo = new TextView(this);
+        diagInfo.setText(
+            "如无日志显示：\n" +
+            "1. 打开 LSPosed 管理器 → 日志\n" +
+            "2. 搜索 \"QuarkAutoSign\"\n" +
+            "3. 确认模块已勾选夸克扫描王\n" +
+            "4. 打开夸克扫描王等待15秒\n" +
+            "5. 如看到 \"模块已激活\" Toast即正常\n\n" +
+            "模块包名: com.qurk.autosign\n" +
+            "目标包名: com.quark.scanking");
+        diagInfo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        diagInfo.setTextColor(Color.DKGRAY);
+        diagInfo.setPadding(0, 4, 0, 20);
+        root.addView(diagInfo);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
