@@ -23,11 +23,9 @@ public class MainActivity extends Activity {
 
     private static final String SP_NAME = "quark_autosign_prefs";
     private static final String KEY_LAST_SIGN = "last_sign_time";
-    private static final String KEY_LAST_LOTTERY = "last_lottery_time";
     private static final String KEY_SIGN_HISTORY = "sign_history";
     private static final String KEY_STATUS_LOG = "status_log";
     private static final String KEY_ENABLE_SIGN = "enable_auto_sign";
-    private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
 
     // 尝试通过反射使用 XSharedPreferences，避免直接引用导致崩溃
@@ -57,11 +55,9 @@ public class MainActivity extends Activity {
         
         // 从夸克APP读取数据（如果可用）
         long quarkLastSign = getQuarkLong(KEY_LAST_SIGN, 0);
-        long quarkLastLottery = getQuarkLong(KEY_LAST_LOTTERY, 0);
         
         // 优先使用夸克的时间（更新的）
         long lastSign = quarkLastSign > sp.getLong(KEY_LAST_SIGN, 0) ? quarkLastSign : sp.getLong(KEY_LAST_SIGN, 0);
-        long lastLottery = quarkLastLottery > sp.getLong(KEY_LAST_LOTTERY, 0) ? quarkLastLottery : sp.getLong(KEY_LAST_LOTTERY, 0);
 
         TextView summary = new TextView(this);
         if (lastSign == 0) {
@@ -71,10 +67,7 @@ public class MainActivity extends Activity {
             String time = sdf.format(new Date(lastSign));
             summary.setText("上次签到时间：" + time + "\n状态：已签到\n");
         }
-        if (lastLottery > 0) {
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
-            summary.append("上次抽奖时间：" + sdf.format(new Date(lastLottery)) + "\n");
-        }
+        summary.append("\n注：抽奖为H5网页功能，需在签到页面手动操作");
         summary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         summary.setPadding(0, 20, 0, 20);
         root.addView(summary);
@@ -92,13 +85,6 @@ public class MainActivity extends Activity {
         signSwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
             sp.edit().putBoolean(KEY_ENABLE_SIGN, isChecked).apply());
         root.addView(signSwitch);
-
-        Switch lotterySwitch = new Switch(this);
-        lotterySwitch.setText("每日自动抽奖（3次）");
-        lotterySwitch.setChecked(sp.getBoolean(KEY_ENABLE_LOTTERY, true));
-        lotterySwitch.setOnCheckedChangeListener((buttonView, isChecked) ->
-            sp.edit().putBoolean(KEY_ENABLE_LOTTERY, isChecked).apply());
-        root.addView(lotterySwitch);
 
         Switch toastSwitch = new Switch(this);
         toastSwitch.setText("Toast 提示");
