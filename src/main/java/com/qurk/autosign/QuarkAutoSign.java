@@ -540,20 +540,47 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         try {
             ClassLoader cl = ctx.getClassLoader();
 
-            // ===== 通过UCParamUtil获取auth参数，手动构建请求body =====
-            Class<?> ucParamUtil = XposedHelpers.findClass(
-                "com.uc.platform.base.ucparam.UCParamUtil", cl);
+            // ===== 获取auth参数（与e()\u65b9法相同的数据源） =====
+            // ut: com.ucpro.business.stat.d.a(false) → 加密的UTDID
+            String ut = null;
+            try {
+                Class<?> utClass = XposedHelpers.findClass("com.ucpro.business.stat.d", cl);
+                ut = (String) XposedHelpers.callStaticMethod(utClass, "a", false);
+            } catch (Throwable e) {
+                log(lpparam, "抽奖: ut获取失败: " + e.getClass().getSimpleName());
+            }
 
-            String ut = safeGetUCParam(ucParamUtil, ctx, "ut");
-            String kp = safeGetUCParam(ucParamUtil, ctx, "kp");
-            String ve = safeGetUCParam(ucParamUtil, ctx, "ve");
-            String sv = safeGetUCParam(ucParamUtil, ctx, "sv");
-            String ch = safeGetUCParam(ucParamUtil, ctx, "ch");
+            // kp: CameraAccountManager.j().h()
+            String kp = null;
+            try {
+                Class<?> camClass = XposedHelpers.findClass(
+                    "com.ucpro.feature.account.CameraAccountManager", cl);
+                Object camInst = XposedHelpers.callStaticMethod(camClass, "j");
+                if (camInst != null) {
+                    kp = (String) XposedHelpers.callMethod(camInst, "h");
+                } else {
+                    log(lpparam, "抽奖: CameraAccountManager单例为null");
+                }
+            } catch (Throwable e) {
+                log(lpparam, "抽奖: kp获取失败: " + e.getClass().getSimpleName());
+            }
+
+            // ve, sv, ch: SoftInfo
+            String ve = null, sv = null, ch = null, chg = null;
+            try {
+                Class<?> softInfo = XposedHelpers.findClass("com.ucpro.config.SoftInfo", cl);
+                ve = (String) XposedHelpers.callStaticMethod(softInfo, "getVersionName");
+                sv = (String) XposedHelpers.callStaticMethod(softInfo, "getSubVersion");
+                ch = (String) XposedHelpers.callStaticMethod(softInfo, "getChFix");
+                chg = (String) XposedHelpers.callStaticMethod(softInfo, "getChGroupFix");
+            } catch (Throwable e) {
+                log(lpparam, "抽奖: SoftInfo获取失败: " + e.getClass().getSimpleName());
+            }
 
             log(lpparam, "抽奖auth: ut=" + (ut != null && ut.length() > 6 ? ut.substring(0, 6) + "..." : ut)
                 + " kp=" + (kp != null ? kp.length() + "字符" : "null") + " ve=" + ve);
 
-            if (ut == null || ut.isEmpty()) {
+            if (ut == null || ut.isEmpty() || "0".equals(ut)) {
                 return "error:ut为空,用户可能未登录";
             }
 
@@ -561,7 +588,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             long timestamp = System.currentTimeMillis();
             String product = "camera_default";
 
-            // 构建含auth的完整body（与签到API使用相同的body格式）
+            // 构建含auth的完整body（与e()方法完全一致的字段）
             org.json.JSONObject body = new org.json.JSONObject();
             if (ve != null) body.put("ve", ve);
             if (sv != null) body.put("sv", sv);
@@ -569,6 +596,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             if (kp != null) body.put("kp", kp);
             body.put("fr", "android");
             if (ch != null && !ch.isEmpty()) body.put("ch", ch);
+            if (chg != null && !chg.isEmpty()) body.put("chg", chg);
             body.put("chid", chid);
             body.put("pr", "scanking");
             body.put("timestamp", timestamp);
@@ -697,13 +725,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    private String safeGetUCParam(Class<?> ucParamUtil, Context ctx, String key) {
-        try {
-            return (String) XposedHelpers.callStaticMethod(ucParamUtil, "getUCParam", ctx, key);
-        } catch (Throwable e) {
-            return null;
-        }
-    }
 
     private void saveLotteryProgress(Context ctx, int completed) {
         try {

@@ -13,6 +13,9 @@ import android.widget.Toast;
 import android.database.Cursor;
 import android.net.Uri;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -166,8 +169,11 @@ public class MainActivity extends Activity {
         logHeader.setPadding(0, 16, 0, 8);
         root.addView(logHeader);
 
-        // 优先通过ContentProvider读取日志（最可靠的跨进程方案）
-        String logRaw = readLogFromProvider();
+        // 优先通过root读取夸克应用目录的日志文件
+        String logRaw = readLogViaSu();
+        if (logRaw.isEmpty()) {
+            logRaw = readLogFromProvider();
+        }
         if (logRaw.isEmpty()) {
             logRaw = readLogFromFile();
         }
@@ -273,6 +279,30 @@ public class MainActivity extends Activity {
         } catch (Throwable e) {
             return def;
         }
+    }
+
+    private String readLogViaSu() {
+        String[] paths = {
+            "/data/data/com.quark.scanking/files/" + LOG_FILE_NAME,
+            "/data/user/0/com.quark.scanking/files/" + LOG_FILE_NAME,
+            "/data/data/com.quark.scank/files/" + LOG_FILE_NAME,
+        };
+        for (String path : paths) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "cat " + path});
+                BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (sb.length() > 0) sb.append("\n");
+                    sb.append(line);
+                }
+                br.close();
+                p.waitFor();
+                if (sb.length() > 0) return sb.toString();
+            } catch (Throwable ignored) {}
+        }
+        return "";
     }
 
     private String readLogFromProvider() {
