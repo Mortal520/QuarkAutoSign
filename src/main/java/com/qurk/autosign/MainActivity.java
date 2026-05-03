@@ -30,6 +30,7 @@ public class MainActivity extends Activity {
     private static final String KEY_ENABLE_SIGN = "enable_auto_sign";
     private static final String KEY_ENABLE_LOTTERY = "enable_auto_lottery";
     private static final String KEY_ENABLE_TOAST = "enable_toast";
+    private static final String LOG_FILE_NAME = "autosign_log.txt";
 
     // 尝试通过反射使用 XSharedPreferences，避免直接引用导致崩溃
     private Object quarkPrefs;
@@ -163,11 +164,14 @@ public class MainActivity extends Activity {
         logHeader.setPadding(0, 16, 0, 8);
         root.addView(logHeader);
 
-        // 使用 XSharedPreferences 读取夸克APP的日志
-        reloadQuarkPrefs();
-        String logRaw = getQuarkString(KEY_STATUS_LOG, "");
+        // 优先从文件读取日志（解决XSharedPreferences跨进程问题）
+        String logRaw = readLogFromFile();
         if (logRaw.isEmpty()) {
-            // 如果没有夸克日志，尝试读取模块自己的日志作为备选
+            // 备选: XSharedPreferences
+            reloadQuarkPrefs();
+            logRaw = getQuarkString(KEY_STATUS_LOG, "");
+        }
+        if (logRaw.isEmpty()) {
             logRaw = sp.getString(KEY_STATUS_LOG, "");
         }
         if (logRaw.isEmpty()) {
@@ -265,5 +269,31 @@ public class MainActivity extends Activity {
         } catch (Throwable e) {
             return def;
         }
+    }
+
+    private String readLogFromFile() {
+        String[] paths = {
+            "/data/data/com.quark.scanking/files/" + LOG_FILE_NAME,
+            "/data/user/0/com.quark.scanking/files/" + LOG_FILE_NAME,
+            "/data/data/com.quark.scank/files/" + LOG_FILE_NAME,
+            "/data/user/0/com.quark.scank/files/" + LOG_FILE_NAME,
+        };
+        for (String path : paths) {
+            try {
+                java.io.File f = new java.io.File(path);
+                if (f.exists() && f.canRead()) {
+                    StringBuilder sb = new StringBuilder();
+                    java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(f));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        if (sb.length() > 0) sb.append("\n");
+                        sb.append(line);
+                    }
+                    br.close();
+                    if (sb.length() > 0) return sb.toString();
+                }
+            } catch (Throwable ignored) {}
+        }
+        return "";
     }
 }

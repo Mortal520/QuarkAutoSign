@@ -8,7 +8,11 @@ import android.util.Log;
 import android.webkit.ValueCallback;
 import android.widget.Toast;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
@@ -19,6 +23,7 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 import javax.net.ssl.HttpsURLConnection;
 
@@ -62,6 +67,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     // 签到网络请求类
     private static final String SIGN_REQUEST_CLASS = "iq0.m"; // extends iq0.d
     private static final String SIGN_REQUEST_START = "k";     // void k(ValueCallback)
+    private static final String LOG_FILE_NAME = "autosign_log.txt";
 
     private static volatile boolean hookToastShown = false;
     private static volatile boolean signDetectedToday = false;
@@ -73,6 +79,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static volatile int lotteryDoneToday = 0;
     private static volatile long lastToastTime = 0;
     private static volatile String lastToastMsg = "";
+    private static volatile long lastCheckTime = 0;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
@@ -87,7 +94,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " 模块注入: " + lpparam.packageName);
         hookApplication(lpparam);
         hookSignInMethod(lpparam);
-        hookActivityResume(lpparam);
     }
 
     private Context getAppContext(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -197,55 +203,30 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    // ==================== Hook Activity.onResume 重新检查 ====================
-
-    private void hookActivityResume(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.app.Activity", lpparam.classLoader, "onResume",
-                new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Context ctx = (Context) param.thisObject;
-                        if (ctx == null) return;
-                        android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
-                        boolean needSign = shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0)) && !signDetectedToday;
-                        boolean needLottery = readSwitch(KEY_ENABLE_LOTTERY, true)
-                            && shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
-                        if ((needSign || needLottery) && !tasksScheduled) {
-                            tasksScheduled = true;
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                checkStatusAndExecute(ctx, lpparam);
-                            }, 3000);
-                        }
-                    }
-                }
-            );
-        } catch (Throwable e) {
-            // Activity hook 失败不影响主流程
-            XposedBridge.log(TAG + " hookActivityResume: " + e.getMessage());
-        }
-    }
-
     // ==================== 状态检查与执行 ====================
 
     private void checkStatusAndExecute(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
+            // 防止60秒内重复检查（多进程/多Activity防护）
+            long now = System.currentTimeMillis();
+            if (now - lastCheckTime < 60000) {
+                log(lpparam, "跳过重复状态检查");
+                return;
+            }
+            lastCheckTime = now;
+
             android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
             boolean needSign = readSwitch(KEY_ENABLE_SIGN, true)
                 && shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))
                 && !signDetectedToday;
             boolean lotteryEnabled = readSwitch(KEY_ENABLE_LOTTERY, true);
             boolean lotteryDone = !shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
-            int lotteryProgress = shouldDoToday(sp.getLong("lottery_progress_day", 0))
-                ? 0 : sp.getInt(KEY_LOTTERY_COUNT, 0);
-            boolean needLottery = lotteryEnabled && !lotteryDone && lotteryProgress < DAILY_LOTTERY_TIMES;
-            int lotteryRemain = DAILY_LOTTERY_TIMES - lotteryProgress;
+            boolean needLottery = lotteryEnabled && !lotteryDone;
 
-            // 构建状态摘要
-            StringBuilder status = new StringBuilder("模块已检查 | ");
+            // 构建状态摘要（不显示具体剩余次数，由服务器决定）
+            StringBuilder status = new StringBuilder("模块已激活 | ");
             if (needSign) {
-                status.append("今日未签到");
+                status.append("待签到");
             } else {
                 status.append("已签到");
             }
@@ -253,7 +234,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             if (lotteryDone) {
                 status.append("抽奖已完成");
             } else if (needLottery) {
-                status.append("抽奖剩余" + lotteryRemain + "次");
+                status.append("抽奖待执行");
             } else if (!lotteryEnabled) {
                 status.append("抽奖已关闭");
             } else {
@@ -543,40 +524,83 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
 
     private String doSingleLotteryDraw(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // 用 iq0.g (签到请求类) 的父类 iq0.d 的 e() 方法构建含token的auth JSON
-            Class<?> reqClass = XposedHelpers.findClass(AUTH_REQ_CLASS, ctx.getClassLoader());
-            Object reqInst = reqClass.getConstructor().newInstance();
-            Class<?> baseClass = reqClass.getSuperclass(); // iq0.d
+            ClassLoader cl = ctx.getClassLoader();
+            String bodyStr = null;
+            String lotteryUrl = LOTTERY_URL;
 
-            java.lang.reflect.Method authBuild = findMethodBySignature(baseClass, AUTH_BUILD_METHOD, 0);
-            if (authBuild == null) {
-                // 备选：找无参且返回JSONObject的方法
-                for (java.lang.reflect.Method m : baseClass.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("JSON")) {
-                        authBuild = m;
-                        break;
+            // ===== 方式1: 通过UCParamExpander构建URL(auth在URL) + 简单body =====
+            try {
+                String urlWithUcParam = LOTTERY_URL + "?uc_param_str=vesvutkpfrcgprospc";
+                Class<?> expanderClass = XposedHelpers.findClass(
+                    "com.uc.platform.base.ucparam.UCParamExpander", cl);
+                String expanded = (String) XposedHelpers.callStaticMethod(
+                    expanderClass, "expandUCParamFromUrl", urlWithUcParam);
+                if (expanded != null && expanded.contains("ut=")) {
+                    lotteryUrl = expanded + "&timestamp=" + System.currentTimeMillis();
+                    log(lpparam, "抽奖: UCParam展开成功, url含ut参数");
+                } else {
+                    log(lpparam, "抽奖: UCParam展开结果无ut参数");
+                }
+            } catch (Throwable e) {
+                log(lpparam, "抽奖: UCParam展开失败: " + e.getClass().getSimpleName());
+            }
+
+            // 简单lottery body (auth在URL中，body只放抽奖参数)
+            org.json.JSONObject simpleBody = new org.json.JSONObject();
+            simpleBody.put("isCoin", false);
+            simpleBody.put("pay_entry", "daily_lottery");
+            simpleBody.put("pay_source", "daily_lottery");
+            simpleBody.put("awardForTest", "");
+            simpleBody.put("chid", UUID.randomUUID().toString().replace("-", ""));
+
+            // ===== 方式2: 如果URL中没有auth参数，尝试e()构建含auth的完整body =====
+            if (!lotteryUrl.contains("ut=")) {
+                log(lpparam, "抽奖: 尝试e()构建含auth的body");
+                try {
+                    Class<?> reqClass = XposedHelpers.findClass(AUTH_REQ_CLASS, cl);
+                    Object reqInst = reqClass.getConstructor().newInstance();
+                    Class<?> baseClass = reqClass.getSuperclass();
+                    java.lang.reflect.Method authBuild = findMethodBySignature(baseClass, AUTH_BUILD_METHOD, 0);
+                    if (authBuild == null) {
+                        for (java.lang.reflect.Method m : baseClass.getDeclaredMethods()) {
+                            if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("JSON")) {
+                                authBuild = m;
+                                break;
+                            }
+                        }
                     }
+                    if (authBuild != null) {
+                        authBuild.setAccessible(true);
+                        Object authJson = authBuild.invoke(reqInst);
+                        if (authJson != null) {
+                            java.lang.reflect.Method putM = authJson.getClass().getMethod("put", String.class, Object.class);
+                            putM.invoke(authJson, "isCoin", Boolean.FALSE);
+                            putM.invoke(authJson, "pay_entry", "daily_lottery");
+                            putM.invoke(authJson, "pay_source", "daily_lottery");
+                            putM.invoke(authJson, "awardForTest", "");
+                            java.lang.reflect.Method toStr = authJson.getClass().getMethod("toJSONString");
+                            bodyStr = (String) toStr.invoke(authJson);
+                            log(lpparam, "抽奖: e()构建成功, body_len=" + bodyStr.length());
+                        } else {
+                            log(lpparam, "抽奖: e()返回null");
+                        }
+                    } else {
+                        log(lpparam, "抽奖: 未找到e()方法");
+                    }
+                } catch (Throwable e) {
+                    log(lpparam, "抽奖: e()构建失败: " + e.getClass().getSimpleName() + ":" + e.getMessage());
                 }
             }
-            if (authBuild == null) return "error:找不到auth构建方法";
-            authBuild.setAccessible(true);
-            Object authJson = authBuild.invoke(reqInst);
-            if (authJson == null) return "error:auth构建返回null";
 
-            // 通过反射向 fastjson JSONObject 添加抽奖参数
-            java.lang.reflect.Method putM = authJson.getClass().getMethod("put", String.class, Object.class);
-            putM.invoke(authJson, "isCoin", Boolean.FALSE);
-            putM.invoke(authJson, "pay_entry", "daily_lottery");
-            putM.invoke(authJson, "pay_source", "daily_lottery");
-            putM.invoke(authJson, "awardForTest", "");
+            // 最终确定body
+            if (bodyStr == null) {
+                bodyStr = simpleBody.toString();
+            }
 
-            // 序列化为JSON字符串
-            java.lang.reflect.Method toStr = authJson.getClass().getMethod("toJSONString");
-            String bodyStr = (String) toStr.invoke(authJson);
-            log(lpparam, "抽奖请求构建完成, body长度=" + bodyStr.length());
+            log(lpparam, "抽奖: POST url_len=" + lotteryUrl.length() + " body_len=" + bodyStr.length());
 
             // HTTPS POST
-            URL url = new URL(LOTTERY_URL);
+            URL url = new URL(lotteryUrl);
             HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
@@ -604,14 +628,12 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             String resp = baos.toString("UTF-8");
             conn.disconnect();
 
-            log(lpparam, "抽奖响应: HTTP" + httpCode + " len=" + resp.length());
+            log(lpparam, "抽奖响应: HTTP" + httpCode + " resp=" + resp.substring(0, Math.min(200, resp.length())));
 
             if (httpCode != 200) return "http_error:" + httpCode;
 
-            // 解析响应 (用android标准JSONObject)
             org.json.JSONObject json = new org.json.JSONObject(resp);
             int code = json.optInt("code", -1);
-            int status = json.optInt("status", -1);
             String msg = json.optString("msg", "");
 
             if (code != 0) return "server_error:code=" + code + ",msg=" + msg;
@@ -620,7 +642,6 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             if (data == null) return "ok:";
 
             int lotteryCount = data.optInt("lotteryCount", 0);
-            // 解析奖品
             String prize = "";
             if (data.has("couponList")) {
                 org.json.JSONArray coupons = data.optJSONArray("couponList");
@@ -632,14 +653,14 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             int coins = data.optInt("validCoins", 0);
             String info = prize;
             if (coins > 0) info += (info.isEmpty() ? "" : ",") + "金币:" + coins;
-            log(lpparam, "抽奖成功 剩余次数=" + lotteryCount + " 奖品=" + info);
+            log(lpparam, "抽奖成功 剩余=" + lotteryCount + " 奖品=" + info);
 
             if (lotteryCount <= 0) return "no_chance";
             return "ok:" + info;
 
         } catch (Throwable e) {
             Log.e(TAG, "doSingleLotteryDraw", e);
-            return "exception:" + e.getMessage();
+            return "exception:" + e.getClass().getSimpleName() + ":" + e.getMessage();
         }
     }
 
@@ -807,11 +828,27 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             }
             list.add(line);
             while (list.size() > MAX_LOG) list.remove(0);
-            sp.edit().putString(KEY_STATUS_LOG, String.join("\n", list)).apply();
+            String fullLog = String.join("\n", list);
+            sp.edit().putString(KEY_STATUS_LOG, fullLog).apply();
             makePrefsWorldReadable(ctx);
+            // 同时写入文件（解决XSharedPreferences跨进程读取问题）
+            writeLogFile(ctx, fullLog);
         } catch (Exception e) {
             // ignore
         }
+    }
+
+    private void writeLogFile(Context ctx, String fullLog) {
+        try {
+            File dir = ctx.getFilesDir();
+            dir.setExecutable(true, false);
+            dir.setReadable(true, false);
+            File logFile = new File(dir, LOG_FILE_NAME);
+            FileWriter fw = new FileWriter(logFile, false);
+            fw.write(fullLog);
+            fw.close();
+            logFile.setReadable(true, false);
+        } catch (Throwable ignored) {}
     }
 
     private void makePrefsWorldReadable(Context ctx) {
