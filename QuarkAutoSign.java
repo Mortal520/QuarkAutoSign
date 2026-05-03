@@ -66,6 +66,10 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private static volatile boolean hookToastShown = false;
     private static volatile boolean signDetectedToday = false;
     private static volatile boolean tasksScheduled = false;
+    private static volatile boolean verifyScheduled = false;
+    private static volatile int signRetryRound = 0;
+    private static final int MAX_SIGN_ROUNDS = 3;       // 最多3轮重试，每轮3次
+    private static final long VERIFY_DELAY_MS = 120000L; // 2分钟后二次验证
     private static volatile int lotteryDoneToday = 0;
     private static volatile long lastToastTime = 0;
     private static volatile String lastToastMsg = "";
@@ -83,6 +87,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " 模块注入: " + lpparam.packageName);
         hookApplication(lpparam);
         hookSignInMethod(lpparam);
+        hookActivityResume(lpparam);
     }
 
     private Context getAppContext(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -192,6 +197,36 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
+    // ==================== Hook Activity.onResume 重新检查 ====================
+
+    private void hookActivityResume(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                "android.app.Activity", lpparam.classLoader, "onResume",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        Context ctx = (Context) param.thisObject;
+                        if (ctx == null) return;
+                        android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+                        boolean needSign = shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0)) && !signDetectedToday;
+                        boolean needLottery = readSwitch(KEY_ENABLE_LOTTERY, true)
+                            && shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
+                        if ((needSign || needLottery) && !tasksScheduled) {
+                            tasksScheduled = true;
+                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                                checkStatusAndExecute(ctx, lpparam);
+                            }, 3000);
+                        }
+                    }
+                }
+            );
+        } catch (Throwable e) {
+            // Activity hook 失败不影响主流程
+            XposedBridge.log(TAG + " hookActivityResume: " + e.getMessage());
+        }
+    }
+
     // ==================== 状态检查与执行 ====================
 
     private void checkStatusAndExecute(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
@@ -233,6 +268,8 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
                     performAutoSignIn(ctx, lpparam, needLottery);
                 }, 2000);
+                // 调度延迟二次验证：2分钟后确认是否真的签到成功
+                scheduleVerify(ctx, lpparam);
             } else if (needLottery) {
                 // 无需签到，直接抽奖
                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
@@ -298,12 +335,39 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
                 doSignInRetry(ctx, lpparam, attempt + 1, chainLottery);
             }, SIGN_RETRY_INTERVAL_MS);
-        } else if (chainLottery) {
-            // 签到全部失败，继续尝试抽奖
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                performAutoLottery(ctx, lpparam);
-            }, 3000);
+        } else {
+            signRetryRound++;
+            log(lpparam, "签到第" + signRetryRound + "轮全部失败");
+            showToastOnce(ctx, "⚠ 签到失败，将在2分钟后重试");
+            if (chainLottery) {
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    performAutoLottery(ctx, lpparam);
+                }, 3000);
+            }
         }
+    }
+
+    private void scheduleVerify(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        if (verifyScheduled) return;
+        verifyScheduled = true;
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            verifyScheduled = false;
+            android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            if (!shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0)) || signDetectedToday) {
+                log(lpparam, "二次验证: 签到已确认成功 ✓");
+                return;
+            }
+            if (signRetryRound >= MAX_SIGN_ROUNDS) {
+                log(lpparam, "签到已达最大重试轮数(" + MAX_SIGN_ROUNDS + "), 请手动签到!");
+                showToastOnce(ctx, "❗ 自动签到失败，请手动签到!");
+                return;
+            }
+            log(lpparam, "二次验证: 签到未成功，开始第" + (signRetryRound + 1) + "轮重试");
+            showToastOnce(ctx, "签到未确认，重新尝试...");
+            performAutoSignIn(ctx, lpparam, false);
+            // 再次调度验证
+            scheduleVerify(ctx, lpparam);
+        }, VERIFY_DELAY_MS);
     }
 
     // ==================== 签到执行 ====================
