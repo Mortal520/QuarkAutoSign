@@ -16,6 +16,8 @@ import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -186,6 +188,15 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
                             return; // 跳过基类，等自定义Application
                         }
 
+                        // 检查进程：仅主进程执行
+                        try {
+                            String procName = Application.getProcessName();
+                            if (procName != null && !procName.equals(lpparam.packageName)) {
+                                log(lpparam, "跳过非主进程: " + procName);
+                                return;
+                            }
+                        } catch (Throwable ignored) {}
+
                         // 延迟检测状态并执行任务
                         if (!tasksScheduled) {
                             tasksScheduled = true;
@@ -207,12 +218,15 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
 
     private void checkStatusAndExecute(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            // 防止60秒内重复检查（多进程/多Activity防护）
+            // 跨进程防重: 用SharedPreferences记录检查时间（同一app内所有进程共享）
             long now = System.currentTimeMillis();
-            if (now - lastCheckTime < 60000) {
-                log(lpparam, "跳过重复状态检查");
+            android.content.SharedPreferences guard = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            long lastSpCheck = guard.getLong("check_time_guard", 0);
+            if (now - lastSpCheck < 60000) {
+                log(lpparam, "跳过重复状态检查(SP guard)");
                 return;
             }
+            guard.edit().putLong("check_time_guard", now).apply();
             lastCheckTime = now;
 
             android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
@@ -525,82 +539,92 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     private String doSingleLotteryDraw(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             ClassLoader cl = ctx.getClassLoader();
-            String bodyStr = null;
-            String lotteryUrl = LOTTERY_URL;
 
-            // ===== 方式1: 通过UCParamExpander构建URL(auth在URL) + 简单body =====
+            // ===== 通过UCParamUtil获取auth参数，手动构建请求body =====
+            Class<?> ucParamUtil = XposedHelpers.findClass(
+                "com.uc.platform.base.ucparam.UCParamUtil", cl);
+
+            String ut = safeGetUCParam(ucParamUtil, ctx, "ut");
+            String kp = safeGetUCParam(ucParamUtil, ctx, "kp");
+            String ve = safeGetUCParam(ucParamUtil, ctx, "ve");
+            String sv = safeGetUCParam(ucParamUtil, ctx, "sv");
+            String ch = safeGetUCParam(ucParamUtil, ctx, "ch");
+
+            log(lpparam, "抽奖auth: ut=" + (ut != null && ut.length() > 6 ? ut.substring(0, 6) + "..." : ut)
+                + " kp=" + (kp != null ? kp.length() + "字符" : "null") + " ve=" + ve);
+
+            if (ut == null || ut.isEmpty()) {
+                return "error:ut为空,用户可能未登录";
+            }
+
+            String chid = UUID.randomUUID().toString();
+            long timestamp = System.currentTimeMillis();
+            String product = "camera_default";
+
+            // 构建含auth的完整body（与签到API使用相同的body格式）
+            org.json.JSONObject body = new org.json.JSONObject();
+            if (ve != null) body.put("ve", ve);
+            if (sv != null) body.put("sv", sv);
+            body.put("ut", ut);
+            if (kp != null) body.put("kp", kp);
+            body.put("fr", "android");
+            if (ch != null && !ch.isEmpty()) body.put("ch", ch);
+            body.put("chid", chid);
+            body.put("pr", "scanking");
+            body.put("timestamp", timestamp);
+            body.put("product", product);
+
+            // 生成token: MD5(EncryptHelper.encryptByExternalKey(plaintext, 14200, false))
             try {
-                String urlWithUcParam = LOTTERY_URL + "?uc_param_str=vesvutkpfrcgprospc";
-                Class<?> expanderClass = XposedHelpers.findClass(
-                    "com.uc.platform.base.ucparam.UCParamExpander", cl);
-                String expanded = (String) XposedHelpers.callStaticMethod(
-                    expanderClass, "expandUCParamFromUrl", urlWithUcParam);
-                if (expanded != null && expanded.contains("ut=")) {
-                    lotteryUrl = expanded + "&timestamp=" + System.currentTimeMillis();
-                    log(lpparam, "抽奖: UCParam展开成功, url含ut参数");
+                String plaintext = timestamp + "_" + product + "_" + ut + "_"
+                    + (ve != null ? ve : "") + "_android_scanking_" + chid;
+
+                Class<?> encryptClass = XposedHelpers.findClass(
+                    "com.uc.encrypt.EncryptHelper", cl);
+
+                String encrypted = null;
+                // 尝试short参数
+                try {
+                    encrypted = (String) XposedHelpers.callStaticMethod(
+                        encryptClass, "encryptByExternalKey", plaintext, (short) 14200, false);
+                } catch (Throwable e1) {
+                    // 尝试int参数
+                    try {
+                        encrypted = (String) XposedHelpers.callStaticMethod(
+                            encryptClass, "encryptByExternalKey", plaintext, 14200, false);
+                    } catch (Throwable e2) {
+                        log(lpparam, "抽奖: encryptByExternalKey失败: " + e2.getClass().getSimpleName());
+                    }
+                }
+
+                if (encrypted != null) {
+                    MessageDigest md = MessageDigest.getInstance("MD5");
+                    byte[] digest = md.digest(encrypted.getBytes());
+                    StringBuilder hex = new StringBuilder();
+                    for (byte b : digest) {
+                        if ((b & 0xFF) < 16) hex.append("0");
+                        hex.append(Long.toString(b & 0xFF, 16));
+                    }
+                    body.put("token", hex.toString());
+                    log(lpparam, "抽奖: token生成成功");
                 } else {
-                    log(lpparam, "抽奖: UCParam展开结果无ut参数");
+                    log(lpparam, "抽奖: 加密返回null，请求可能失败");
                 }
             } catch (Throwable e) {
-                log(lpparam, "抽奖: UCParam展开失败: " + e.getClass().getSimpleName());
+                log(lpparam, "抽奖: token生成异常: " + e.getClass().getSimpleName() + ":" + e.getMessage());
             }
 
-            // 简单lottery body (auth在URL中，body只放抽奖参数)
-            org.json.JSONObject simpleBody = new org.json.JSONObject();
-            simpleBody.put("isCoin", false);
-            simpleBody.put("pay_entry", "daily_lottery");
-            simpleBody.put("pay_source", "daily_lottery");
-            simpleBody.put("awardForTest", "");
-            simpleBody.put("chid", UUID.randomUUID().toString().replace("-", ""));
+            // 添加抽奖参数
+            body.put("isCoin", false);
+            body.put("pay_entry", "daily_lottery");
+            body.put("pay_source", "daily_lottery");
+            body.put("awardForTest", "");
 
-            // ===== 方式2: 如果URL中没有auth参数，尝试e()构建含auth的完整body =====
-            if (!lotteryUrl.contains("ut=")) {
-                log(lpparam, "抽奖: 尝试e()构建含auth的body");
-                try {
-                    Class<?> reqClass = XposedHelpers.findClass(AUTH_REQ_CLASS, cl);
-                    Object reqInst = reqClass.getConstructor().newInstance();
-                    Class<?> baseClass = reqClass.getSuperclass();
-                    java.lang.reflect.Method authBuild = findMethodBySignature(baseClass, AUTH_BUILD_METHOD, 0);
-                    if (authBuild == null) {
-                        for (java.lang.reflect.Method m : baseClass.getDeclaredMethods()) {
-                            if (m.getParameterCount() == 0 && m.getReturnType().getSimpleName().contains("JSON")) {
-                                authBuild = m;
-                                break;
-                            }
-                        }
-                    }
-                    if (authBuild != null) {
-                        authBuild.setAccessible(true);
-                        Object authJson = authBuild.invoke(reqInst);
-                        if (authJson != null) {
-                            java.lang.reflect.Method putM = authJson.getClass().getMethod("put", String.class, Object.class);
-                            putM.invoke(authJson, "isCoin", Boolean.FALSE);
-                            putM.invoke(authJson, "pay_entry", "daily_lottery");
-                            putM.invoke(authJson, "pay_source", "daily_lottery");
-                            putM.invoke(authJson, "awardForTest", "");
-                            java.lang.reflect.Method toStr = authJson.getClass().getMethod("toJSONString");
-                            bodyStr = (String) toStr.invoke(authJson);
-                            log(lpparam, "抽奖: e()构建成功, body_len=" + bodyStr.length());
-                        } else {
-                            log(lpparam, "抽奖: e()返回null");
-                        }
-                    } else {
-                        log(lpparam, "抽奖: 未找到e()方法");
-                    }
-                } catch (Throwable e) {
-                    log(lpparam, "抽奖: e()构建失败: " + e.getClass().getSimpleName() + ":" + e.getMessage());
-                }
-            }
-
-            // 最终确定body
-            if (bodyStr == null) {
-                bodyStr = simpleBody.toString();
-            }
-
-            log(lpparam, "抽奖: POST url_len=" + lotteryUrl.length() + " body_len=" + bodyStr.length());
+            String bodyStr = body.toString();
+            log(lpparam, "抽奖: body构建完成, len=" + bodyStr.length() + " hasToken=" + body.has("token"));
 
             // HTTPS POST
-            URL url = new URL(lotteryUrl);
+            URL url = new URL(LOTTERY_URL);
             HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
@@ -611,6 +635,15 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             conn.setDoOutput(true);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(15000);
+
+            // 附加CookieManager中的Cookie
+            try {
+                String cookies = android.webkit.CookieManager.getInstance()
+                    .getCookie("https://scan-order.quark.cn");
+                if (cookies != null && !cookies.isEmpty()) {
+                    conn.setRequestProperty("Cookie", cookies);
+                }
+            } catch (Throwable ignored) {}
 
             OutputStream os = conn.getOutputStream();
             os.write(bodyStr.getBytes("UTF-8"));
@@ -661,6 +694,14 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         } catch (Throwable e) {
             Log.e(TAG, "doSingleLotteryDraw", e);
             return "exception:" + e.getClass().getSimpleName() + ":" + e.getMessage();
+        }
+    }
+
+    private String safeGetUCParam(Class<?> ucParamUtil, Context ctx, String key) {
+        try {
+            return (String) XposedHelpers.callStaticMethod(ucParamUtil, "getUCParam", ctx, key);
+        } catch (Throwable e) {
+            return null;
         }
     }
 
@@ -839,6 +880,16 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
     }
 
     private void writeLogFile(Context ctx, String fullLog) {
+        // 方式1: 通过ContentProvider写入模块自身目录（最可靠的跨进程方案）
+        try {
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put("log", fullLog);
+            ctx.getContentResolver().insert(
+                android.net.Uri.parse("content://com.qurk.autosign.logprovider/log"), values);
+        } catch (Throwable e) {
+            // ContentProvider不可用时回退到文件
+        }
+        // 方式2: 写入夸克files目录（文件权限回退）
         try {
             File dir = ctx.getFilesDir();
             dir.setExecutable(true, false);

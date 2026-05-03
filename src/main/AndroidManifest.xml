@@ -20,6 +20,12 @@
             </intent-filter>
         </activity>
 
+        <provider
+            android:name=".LogProvider"
+            android:authorities="com.qurk.autosign.logprovider"
+            android:exported="true"
+            android:grantUriPermissions="true" />
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />

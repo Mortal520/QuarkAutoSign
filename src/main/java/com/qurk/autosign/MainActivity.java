@@ -10,6 +10,8 @@ import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.database.Cursor;
+import android.net.Uri;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -164,10 +166,12 @@ public class MainActivity extends Activity {
         logHeader.setPadding(0, 16, 0, 8);
         root.addView(logHeader);
 
-        // 优先从文件读取日志（解决XSharedPreferences跨进程问题）
-        String logRaw = readLogFromFile();
+        // 优先通过ContentProvider读取日志（最可靠的跨进程方案）
+        String logRaw = readLogFromProvider();
         if (logRaw.isEmpty()) {
-            // 备选: XSharedPreferences
+            logRaw = readLogFromFile();
+        }
+        if (logRaw.isEmpty()) {
             reloadQuarkPrefs();
             logRaw = getQuarkString(KEY_STATUS_LOG, "");
         }
@@ -269,6 +273,25 @@ public class MainActivity extends Activity {
         } catch (Throwable e) {
             return def;
         }
+    }
+
+    private String readLogFromProvider() {
+        try {
+            Cursor cursor = getContentResolver().query(
+                Uri.parse("content://com.qurk.autosign.logprovider/log"),
+                null, null, null, null);
+            if (cursor != null) {
+                try {
+                    if (cursor.moveToFirst()) {
+                        String log = cursor.getString(0);
+                        if (log != null && !log.isEmpty()) return log;
+                    }
+                } finally {
+                    cursor.close();
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "";
     }
 
     private String readLogFromFile() {
