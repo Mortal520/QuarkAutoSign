@@ -8,6 +8,8 @@ import android.util.Log;
 import android.webkit.ValueCallback;
 import android.widget.Toast;
 
+import android.os.PowerManager;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -96,6 +98,7 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         XposedBridge.log(TAG + " 模块注入: " + lpparam.packageName);
         hookApplication(lpparam);
         hookSignInMethod(lpparam);
+        hookActivityResume(lpparam);
     }
 
     private Context getAppContext(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -214,7 +217,52 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
         }
     }
 
-    // ==================== 状态检查与执行 ====================
+    // ==================== Activity.onResume 安全网（后台启动失败时的回退） ====================
+
+    private void hookActivityResume(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            XposedHelpers.findAndHookMethod(
+                android.app.Activity.class, "onResume",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        android.app.Activity activity = (android.app.Activity) param.thisObject;
+                        Context ctx = activity.getApplicationContext();
+                        if (ctx == null) return;
+
+                        // 每日级别去重: 今天已经通过onResume触发过则跳过
+                        android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+                        long lastResumeCheck = sp.getLong("last_resume_check", 0);
+                        if (!shouldDoToday(lastResumeCheck)) return;
+
+                        // 检查是否还有未完成的任务
+                        boolean needSign = readSwitch(KEY_ENABLE_SIGN, true)
+                            && shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))
+                            && !signDetectedToday;
+                        boolean needLottery = readSwitch(KEY_ENABLE_LOTTERY, true)
+                            && shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
+
+                        if (!needSign && !needLottery) return;
+
+                        sp.edit().putLong("last_resume_check", System.currentTimeMillis()).apply();
+                        log(lpparam, "onResume触发补救: 签到=" + needSign + " 抽奖=" + needLottery);
+
+                        // 重置防重标记，允许重新检查
+                        lastCheckTime = 0;
+                        sp.edit().putLong("check_time_guard", 0).apply();
+
+                        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                            checkStatusAndExecute(ctx, lpparam);
+                        }, 2000);
+                    }
+                });
+            log(lpparam, "已Hook Activity.onResume(每日补救)");
+        } catch (Throwable e) {
+            log(lpparam, "hookActivityResume失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 状态检查与执行 ==
 
     private void checkStatusAndExecute(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
         try {
@@ -228,6 +276,15 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             }
             guard.edit().putLong("check_time_guard", now).apply();
             lastCheckTime = now;
+
+            // 获取WakeLock防止Doze模式中断执行
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            PowerManager.WakeLock wl = null;
+            try {
+                wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TAG + ":exec");
+                wl.acquire(5 * 60 * 1000L); // 最多5分钟
+            } catch (Throwable ignored) {}
+            final PowerManager.WakeLock wakeLock = wl;
 
             android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
             boolean needSign = readSwitch(KEY_ENABLE_SIGN, true)
@@ -262,17 +319,53 @@ public class QuarkAutoSign implements IXposedHookLoadPackage {
             if (needSign) {
                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
                     performAutoSignIn(ctx, lpparam, needLottery);
+                    releaseWakeLock(wakeLock);
                 }, 2000);
                 // 调度延迟二次验证：2分钟后确认是否真的签到成功
                 scheduleVerify(ctx, lpparam);
+                // 后台启动时的长间隔重试（应对Doze模式网络不可用）
+                scheduleDozeFallback(ctx, lpparam);
             } else if (needLottery) {
                 // 无需签到，直接抽奖
                 new Handler(Looper.getMainLooper()).postDelayed(() -> {
                     performAutoLottery(ctx, lpparam);
+                    releaseWakeLock(wakeLock);
                 }, 2000);
+            } else {
+                releaseWakeLock(wakeLock);
             }
         } catch (Throwable e) {
             log(lpparam, "状态检查异常: " + e.getMessage());
+        }
+    }
+
+    private void releaseWakeLock(PowerManager.WakeLock wl) {
+        try {
+            if (wl != null && wl.isHeld()) wl.release();
+        } catch (Throwable ignored) {}
+    }
+
+    // Doze模式回退: 在更长间隔后重试（设备可能已退出Doze）
+    private void scheduleDozeFallback(Context ctx, XC_LoadPackage.LoadPackageParam lpparam) {
+        Handler handler = new Handler(Looper.getMainLooper());
+        long[] delays = {5 * 60000L, 15 * 60000L, 30 * 60000L}; // 5分钟, 15分钟, 30分钟
+        for (long delay : delays) {
+            handler.postDelayed(() -> {
+                try {
+                    android.content.SharedPreferences sp = ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+                    boolean needSign = readSwitch(KEY_ENABLE_SIGN, true)
+                        && shouldDoToday(sp.getLong(KEY_LAST_SIGN, 0))
+                        && !signDetectedToday;
+                    boolean needLottery = readSwitch(KEY_ENABLE_LOTTERY, true)
+                        && shouldDoToday(sp.getLong(KEY_LAST_LOTTERY, 0));
+                    if (needSign || needLottery) {
+                        log(lpparam, "Doze回退重试: 签到=" + needSign + " 抽奖=" + needLottery);
+                        lastCheckTime = 0;
+                        sp.edit().putLong("check_time_guard", 0).apply();
+                        checkStatusAndExecute(ctx, lpparam);
+                    }
+                } catch (Throwable ignored) {}
+            }, delay);
         }
     }
 
